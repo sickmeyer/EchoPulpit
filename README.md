@@ -371,9 +371,12 @@ Per-video artifacts land in `<output.dir>/<video_id>/`:
 Whisper were used), `sermon.json/.txt` (extracted sermon portion),
 `article.json` (frontmatter fields + the markdown body + `reviewer_notes`,
 after scripture verification), `article_raw.md` (the model's original
-output, pre-verification, kept for debugging), `article.html`,
-`sermon-article.pdf`. `bootstrap.sh` uploads all of this except `media/`
-(raw audio) to S3.
+output, pre-verification, kept for debugging), `article.md` (the finished,
+publishable frontmatter + body reassembled into one clean document --
+distinct from `article_raw.md`), `article.html`, `sermon-article.pdf`.
+`bootstrap.sh` uploads all of this except `media/` (raw audio) to S3. The
+Notifier Lambda attaches both `sermon-article.pdf` and `article.md` to the
+completion email.
 
 ### Security notes
 

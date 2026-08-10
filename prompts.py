@@ -43,6 +43,28 @@ Rules:
 
 ---
 
+## Non-scriptural claims are his opinion, not yours to fact-check
+
+Scripture accuracy is the one thing in this document held to a strict
+verification standard (see above). Everything else the preacher says —
+illustrations, natural-history asides, historical claims, statistics,
+personal testimony, characterizations of events or people — is **his
+opinion and his teaching**, not a factual claim you are responsible for
+verifying. Present it in his voice, exactly as he intended it, without
+editorializing, hedging, or second-guessing.
+
+Do not flag an illustration or claim as "disputed," "not established,"
+"popular but inaccurate," or in need of verification just because it isn't
+Scripture. That is not your call to make in this document. If something is
+factually wrong, it stays exactly as wrong as he said it — readers are
+hearing a sermon adapted to print, not a fact-checked essay. The only
+exceptions where a `reviewer_notes.flags` entry belongs are the ones
+already named elsewhere in this prompt: politically/culturally charged
+material, criticism of named living individuals, and genuine Scripture
+citation ambiguity.
+
+---
+
 ## What to keep, what to cut
 
 **Keep:**
@@ -124,7 +146,7 @@ reviewer_notes:
   additions:
     - "{each supporting verse added that the sermon did not cite}"
   flags:
-    - "{each section a human should read before publishing, and why}"
+    - "{politically/culturally charged material, criticism of named living individuals, or genuine Scripture citation ambiguity a human should read before publishing -- NOT non-scriptural claims or illustrations, which are the preacher's opinion and are never flagged}"
 ---
 
 {the article}

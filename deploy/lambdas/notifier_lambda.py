@@ -55,6 +55,7 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str):
     prefix = s3_prefix.split(f"s3://{ARTIFACTS_BUCKET}/", 1)[-1]
     article_key = f"{prefix}article.json"
     pdf_key = f"{prefix}sermon-article.pdf"
+    md_key = f"{prefix}article.md"
 
     meta_description = ""
     needs_review = True
@@ -102,6 +103,16 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str):
         msg.attach(attachment)
     except Exception as e:
         print(f"Could not attach PDF for {video_id}: {e}")
+
+    try:
+        md_obj = _s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=md_key)
+        md_attachment = MIMEApplication(md_obj["Body"].read(), _subtype="markdown")
+        md_attachment.add_header(
+            "Content-Disposition", "attachment", filename="article.md"
+        )
+        msg.attach(md_attachment)
+    except Exception as e:
+        print(f"Could not attach article.md for {video_id}: {e}")
 
     _ses.send_raw_email(
         Source=SENDER, Destinations=[RECIPIENT], RawMessage={"Data": msg.as_string()}
