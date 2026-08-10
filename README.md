@@ -111,20 +111,47 @@ mkdir -p .build
 render iam/deployer-packer-policy.json .build/deployer-packer-policy.json
 render iam/deployer-setup-policy.json  .build/deployer-setup-policy.json
 
-aws iam create-user --user-name echopulpit-deployer
+if ! aws iam get-user --user-name echopulpit-deployer >/dev/null 2>&1; then
+  aws iam create-user --user-name echopulpit-deployer
+fi
 
-aws iam put-user-policy --user-name echopulpit-deployer \
-  --policy-name packer-build --policy-document file://.build/deployer-packer-policy.json
+# Managed policies, not inline (`put-user-policy`) -- inline policies on an
+# IAM *user* are capped at 2048 bytes, which deployer-setup-policy.json
+# exceeds once its ${...} placeholders are filled in with real ARNs. Managed
+# policies get a 6144-character limit and are versioned, so this is also
+# safe to re-run as the policy content evolves.
+create_or_update_policy() {
+  local name="$1" doc="$2"
+  local arn="arn:aws:iam::${ACCOUNT_ID}:policy/${name}"
+  if aws iam get-policy --policy-arn "$arn" >/dev/null 2>&1; then
+    local old_version
+    old_version="$(aws iam list-policy-versions --policy-arn "$arn" \
+      --query 'Versions[?IsDefaultVersion==`false`]|[0].VersionId' --output text)"
+    if [[ "$old_version" != "None" && -n "$old_version" ]]; then
+      aws iam delete-policy-version --policy-arn "$arn" --version-id "$old_version" || true
+    fi
+    aws iam create-policy-version --policy-arn "$arn" \
+      --policy-document "file://${doc}" --set-as-default >/dev/null
+  else
+    aws iam create-policy --policy-name "$name" --policy-document "file://${doc}" >/dev/null
+  fi
+  echo "$arn"
+}
 
-aws iam put-user-policy --user-name echopulpit-deployer \
-  --policy-name setup-provisioning --policy-document file://.build/deployer-setup-policy.json
+PACKER_POLICY_ARN="$(create_or_update_policy echopulpit-packer-build .build/deployer-packer-policy.json)"
+SETUP_POLICY_ARN="$(create_or_update_policy echopulpit-setup-provisioning .build/deployer-setup-policy.json)"
+
+aws iam attach-user-policy --user-name echopulpit-deployer --policy-arn "$PACKER_POLICY_ARN"
+aws iam attach-user-policy --user-name echopulpit-deployer --policy-arn "$SETUP_POLICY_ARN"
 
 aws iam create-access-key --user-name echopulpit-deployer
 ```
 
 The last command prints an `AccessKeyId`/`SecretAccessKey` **once** -- save
 it immediately (e.g. `aws configure --profile echopulpit-deployer`); it can't be
-retrieved again.
+retrieved again. (If you're re-running this and already have a key, skip that
+last line -- `create-access-key` isn't idempotent and AWS caps users at 2
+active keys.)
 
 What each policy covers:
 - `deploy/iam/deployer-packer-policy.json` -- HashiCorp's documented
