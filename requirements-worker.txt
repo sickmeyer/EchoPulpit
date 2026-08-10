@@ -1,0 +1,25 @@
+# Installed at boot on the worker EC2 instance (see deploy/bootstrap.sh).
+# Deliberately excludes llama-cpp-python: it requires compiling from source
+# (slow, and was the source of real build failures earlier in development),
+# and the worker is Claude-primary for v1 -- sermon_pipeline.py's import of
+# it is lazy (only inside init_llm()), so it's simply never needed here.
+google-api-python-client==2.155.0
+google-auth==2.36.0
+google-auth-httplib2==0.2.0
+httplib2==0.22.0
+
+yt-dlp
+
+faster-whisper==1.1.1
+
+# Unpinned deliberately: 0.42.0 predates support for the `thinking` param
+# ClaudeBackend now sends (confirmed via a live TypeError from the pinned
+# version), and this installs fresh at every boot anyway (see header) so
+# there's no reproducibility to lose by tracking current.
+anthropic
+
+PyYAML==6.0.2
+reportlab==4.2.5
+markdown==3.7
+
+boto3==1.35.99

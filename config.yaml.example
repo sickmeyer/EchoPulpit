@@ -20,11 +20,36 @@ sermon_extraction:
   drop_threshold_segments: 8
 
 llm:
-  model_path: ""       # or set env LLM_MODEL_PATH
+  # Article generation uses Claude if ANTHROPIC_API_KEY is set in the
+  # environment (fast, no local model load, small per-call cost) and falls
+  # back to the local GGUF model below otherwise. On the local path, long
+  # transcripts are chunked and summarized first to fit the model's context;
+  # Claude's context window is large enough that this is skipped entirely.
+  claude_model: "claude-sonnet-5"   # or set env CLAUDE_MODEL
+  # Pastoral style guide (markdown, plain-language, editable by non-devs --
+  # see prompts/style_guide.md) injected into the prompt. Missing/empty is
+  # fine, degrades gracefully to just the system prompt's own voice guidance.
+  style_guide_path: "prompts/style_guide.md"   # or set env STYLE_GUIDE_PATH
+  model_path: ""       # or set env LLM_MODEL_PATH -- only used without ANTHROPIC_API_KEY
   n_ctx: 4096
   temperature: 0.6
   top_p: 0.9
-  max_tokens: 1400
+  # Confirmed by testing: 1600 truncated mid-article; 4000 got a full
+  # ~1,400-word article_html but still truncated before the trailing fields
+  # (HTML tags/entities and the preceding YAML fields eat more of the budget
+  # than raw word count suggests). The v2 prompt's 1,800-2,600 word target
+  # plus full verbatim KJV blockquotes (not just references) runs longer
+  # still, so this needs real headroom -- it's just a ceiling, no cost for
+  # headroom not used.
+  #
+  # claude-sonnet-5 reasons by default and thinking tokens count against
+  # max_tokens -- production logs showed thinking alone consuming 7999 of
+  # an 8000 budget, leaving nothing for the article itself. This model uses
+  # thinking.type=adaptive + output_config.effort (not the older
+  # enabled/budget_tokens scheme, which it rejects with a 400). max_tokens
+  # stays generous regardless, as a cheap safety ceiling.
+  max_tokens: 16000
+  thinking_effort: "medium"
 
 output:
   dir: "/data/output"

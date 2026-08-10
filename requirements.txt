@@ -9,7 +9,13 @@ faster-whisper==1.1.1
 
 llama-cpp-python==0.3.7
 
+# Unpinned deliberately: 0.42.0 predates support for the `thinking` param
+# ClaudeBackend now sends (confirmed via a live TypeError from the pinned
+# version).
+anthropic
+
 PyYAML==6.0.2
 reportlab==4.2.5
+markdown==3.7
 
 boto3==1.35.99
