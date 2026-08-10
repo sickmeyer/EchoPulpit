@@ -1,0 +1,16 @@
+[Unit]
+Description=EchoPulpit worker (single job, self-terminating)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/echopulpit/bootstrap.sh
+# Do not restart -- bootstrap.sh terminates the instance itself when done,
+# and a crash-restart loop here would fight the watchdog/self-terminate logic.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

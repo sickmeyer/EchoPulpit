@@ -1,0 +1,15 @@
+config.yaml
+output/
+models/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Rendered IAM policies (contain real account IDs/resource names) and
+# packaged Lambda zips produced by deploy/setup.sh -- never commit these.
+deploy/.build/
+*.pkr.hcl.bak
+

@@ -1,0 +1,92 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WhoAmI",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ArtifactsBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutEncryptionConfiguration",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::${ARTIFACTS_BUCKET}"
+    },
+    {
+      "Sid": "JobsTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}"
+    },
+    {
+      "Sid": "YoutubeKeySecret",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:echopulpit/youtube-api-key*"
+    },
+    {
+      "Sid": "CreateAndConfigureRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy",
+        "iam:CreateInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:AddRoleToInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::${ACCOUNT_ID}:role/echopulpit-*",
+        "arn:aws:iam::${ACCOUNT_ID}:instance-profile/echopulpit-*"
+      ]
+    },
+    {
+      "Sid": "PassRolesToLambdaAndEc2",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/echopulpit-*"
+    },
+    {
+      "Sid": "DeployLambdas",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:GetFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:ListEventSourceMappings",
+        "lambda:CreateEventSourceMapping"
+      ],
+      "Resource": [
+        "arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:echopulpit-poller",
+        "arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:echopulpit-notifier",
+        "arn:aws:lambda:${REGION}:${ACCOUNT_ID}:event-source-mapping:*"
+      ]
+    },
+    {
+      "Sid": "PollerSchedule",
+      "Effect": "Allow",
+      "Action": ["events:PutRule", "events:PutTargets"],
+      "Resource": "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/echopulpit-poller-schedule"
+    },
+    {
+      "Sid": "VerifySesSenderAndRecipient",
+      "Effect": "Allow",
+      "Action": "ses:VerifyEmailIdentity",
+      "Resource": "*"
+    }
+  ]
+}
