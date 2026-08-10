@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UploadArtifacts",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::${ARTIFACTS_BUCKET}/sermons/*"
+    },
+    {
+      "Sid": "UpdateOwnJobStatus",
+      "Effect": "Allow",
+      "Action": "dynamodb:UpdateItem",
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}"
+    },
+    {
+      "Sid": "ReadOwnTags",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeTags",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SelfTerminate",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:${REGION}:${ACCOUNT_ID}:instance/*",
+      "Condition": {
+        "StringEquals": { "ec2:ResourceTag/Project": "echopulpit" }
+      }
+    },
+    {
+      "Sid": "ShipLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/echopulpit-worker:*"
+    }
+  ]
+}

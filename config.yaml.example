@@ -1,0 +1,34 @@
+youtube:
+  # api_key is intentionally NOT stored here. The Poller Lambda reads it from
+  # Secrets Manager; this pipeline script only reads YOUTUBE_API_KEY from the
+  # environment when it needs it directly (e.g. local/manual runs).
+  channel_id: ""       # or set env CHANNEL_ID
+  lookback_hours: 48
+
+transcription:
+  whisper_model: "medium"   # tiny, base, small, medium, large-v3
+  language: "en"
+  vad_filter: true
+  prefer_captions: true       # try YouTube captions before falling back to Whisper
+  min_caption_coverage: 0.85  # fall back to Whisper if captions cover less than this fraction of the video
+  caption_langs: ["en", "en-US", "en-GB"]
+
+sermon_extraction:
+  min_minutes: 12
+  max_fraction_of_total: 0.9
+  window_minutes: 12
+  drop_threshold_segments: 8
+
+llm:
+  model_path: ""       # or set env LLM_MODEL_PATH
+  n_ctx: 4096
+  temperature: 0.6
+  top_p: 0.9
+  max_tokens: 1400
+
+output:
+  dir: "/data/output"
+
+# Note: there is no "watch" mode anymore. This script now always runs a
+# single job for one VIDEO_ID and exits (see bootstrap.sh) -- polling for
+# new videos is the Poller Lambda's job, not this script's.
