@@ -77,6 +77,25 @@ def _get_recent_video_ids(youtube, playlist_id: str, max_results: int) -> list:
     ]
 
 
+_SPANISH_TITLE_MARKERS = ("español", "espanol", "spanish")
+
+
+def _is_spanish(video: dict) -> bool:
+    """
+    The pipeline is English-only (Whisper language="en", Claude prompt
+    assumes English pastoral prose) -- skip Spanish-language services
+    rather than run them through it and produce a garbled/wrong-language
+    article. Prefers YouTube's own language metadata when uploaders set it;
+    falls back to a title keyword check since that's not always populated.
+    """
+    snippet = video.get("snippet", {})
+    lang = (snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "").lower()
+    if lang.startswith("es"):
+        return True
+    title = (snippet.get("title") or "").lower()
+    return any(marker in title for marker in _SPANISH_TITLE_MARKERS)
+
+
 def _get_ended_livestreams(youtube, video_ids: list) -> list:
     """Returns video dicts (snippet/liveStreamingDetails/contentDetails) for
     videos in video_ids that were livestreams which have already ended."""
@@ -167,6 +186,9 @@ def lambda_handler(event, context):
     for video in ended:
         video_id = video["id"]
         title = video["snippet"]["title"]
+        if _is_spanish(video):
+            print(f"Skipping Spanish-language video {video_id} ({title!r}) -- pipeline is English-only")
+            continue
         end_time = video["liveStreamingDetails"]["actualEndTime"]
         try:
             duration_seconds = _iso8601_duration_to_seconds(

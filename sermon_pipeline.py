@@ -1099,6 +1099,22 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
         article = llm_generate_article(backend, sermon_text, llm_cfg, job_dir, style_guide=style_guide)
         write_json(article_json_path, article)
 
+    # Finished markdown: frontmatter (everything except the body itself)
+    # reassembled with the verified article_markdown body into one clean,
+    # publishable .md file -- distinct from article_raw.md, which is the
+    # model's original pre-verification output kept only for debugging.
+    # Cheap (no LLM call), so always kept in sync with article.json/html/pdf.
+    md_path = os.path.join(job_dir, "article.md")
+    frontmatter_only = {k: v for k, v in article.items() if k != "article_markdown"}
+    finished_markdown = (
+        "---\n"
+        + yaml.safe_dump(frontmatter_only, sort_keys=False, allow_unicode=True)
+        + "---\n\n"
+        + article.get("article_markdown", "")
+    )
+    write_text(md_path, finished_markdown)
+    print(f"[{utc_now_iso()}] Wrote finished article markdown: {md_path}")
+
     # Ensure we have a standalone HTML file (even if we didn't run LLM this time)
     if not file_exists_nonempty(html_path):
         article_body_html = markdown.markdown(article.get("article_markdown", ""))
