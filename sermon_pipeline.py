@@ -9,15 +9,17 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 
 import yaml
+import anthropic
+import markdown
 from googleapiclient.discovery import build
 
 from faster_whisper import WhisperModel
-from llama_cpp import Llama
 
 from storage import StateStore
 from sermon_heuristics import Segment, extract_sermon
 from prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from render_pdf import render_pdf
+from scripture_lookup import kjv_available, verify_and_correct_scripture
 
 
 # ---- Prompt helpers ----
@@ -29,18 +31,6 @@ Return concise bullet notes only (no JSON, no markdown fences) capturing:
 - Illustrations/examples used
 - Practical applications / calls to action
 Be faithful to the content; do not add new doctrine or random verses."""
-
-FIRST_PERSON_ENFORCER_SYSTEM = """You are the pastor who preached this message.
-Write in first person (I/we) as the speaker, addressing the reader directly (you/your).
-NEVER refer to "the pastor" or "the speaker" in third person. Do not write "he said/she said".
-If you mention the sermon, say "when I preached this message..." not third person.
-"""
-
-FIRST_PERSON_ENFORCER_USER = """IMPORTANT:
-Write the article as if you (the preacher) are the author.
-Use first person ("I", "we", "my prayer is...") and speak directly to the reader ("you").
-Never describe yourself as "the speaker" or "the pastor".
-"""
 
 
 def utc_now_iso() -> str:
@@ -154,6 +144,30 @@ def _clean_audio_leftovers(out_dir: str):
                 pass
 
 
+def _yt_dlp_client_and_cookie_args() -> List[str]:
+    """
+    YouTube increasingly blocks requests from cloud/datacenter IPs (AWS EC2
+    included) with a "Sign in to confirm you're not a bot" error, on both
+    the caption fetch and audio download paths. Cookies from a real logged-in
+    session are yt-dlp's own recommended fix. Path is a file fetched from
+    Secrets Manager at boot (see bootstrap.sh); local/manual runs simply
+    won't set this env var and get the cookie-less behavior below.
+
+    The android player_client is a *separate* anti-bot workaround (it mimics
+    the YouTube mobile app's API, which historically got waved through) --
+    but it doesn't support cookie auth at all, so yt-dlp silently skips it
+    whenever --cookies is also passed and falls back to a client that often
+    can't see audio-only formats ("Only images are available for download").
+    These two workarounds are mutually exclusive: use cookies when we have
+    them (the stronger, more durable fix), fall back to the android client
+    trick only when we don't.
+    """
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE")
+    if cookies_file and os.path.isfile(cookies_file):
+        return ["--cookies", cookies_file]
+    return ["--extractor-args", "youtube:player_client=android"]
+
+
 def download_audio(video_id: str, out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     _clean_audio_leftovers(out_dir)
@@ -163,8 +177,7 @@ def download_audio(video_id: str, out_dir: str) -> str:
         "yt-dlp",
         "-f", "bestaudio[protocol!*=m3u8]/bestaudio/best",
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=android",
-        "--js-runtimes", "node",
+        *_yt_dlp_client_and_cookie_args(),
         "--add-header", "Referer:https://www.youtube.com/",
         "-o", out_tpl,
         url
@@ -251,8 +264,7 @@ def fetch_captions_json3(video_id: str, out_dir: str, langs: List[str]) -> Optio
             "--sub-lang", lang_arg,
             "--sub-format", "json3",
             "--skip-download",
-            "--extractor-args", "youtube:player_client=android",
-            "--js-runtimes", "node",
+            *_yt_dlp_client_and_cookie_args(),
             "-o", out_tpl,
             url,
         ]
@@ -412,20 +424,91 @@ def chunk_text_by_chars(text: str, max_chars: int = 5000) -> List[str]:
     return [c for c in chunks if c]
 
 
-def llm_chat(llm: Llama, messages: List[Dict[str, str]], cfg: Dict[str, Any]) -> str:
-    temperature = float(cfg.get("temperature", 0.6))
-    top_p = float(cfg.get("top_p", 0.9))
-    max_tokens = int(cfg.get("max_tokens", 1400))
-    resp = llm.create_chat_completion(
-        messages=messages,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-    )
-    return resp["choices"][0]["message"]["content"].strip()
+# ---- Article-generation backends ----
+# Two interchangeable ways to turn sermon notes into the YAML article package:
+# a local GGUF model (always available, no per-call cost, slow on CPU) or the
+# Claude API (fast, no local model load, small per-call cost). Which one is
+# used is decided once per run by build_backend() based on whether
+# ANTHROPIC_API_KEY is set -- everything downstream (llm_generate_article,
+# repair_yaml, etc.) just calls backend.chat(...) and doesn't care which.
+
+class LocalLlamaBackend:
+    """Local GGUF model via llama-cpp-python. Small context window, so
+    long transcripts still need the chunk-then-summarize map-reduce pass."""
+
+    preferred_chunk_chars = int(os.environ.get("SERMON_CHUNK_CHARS", "5000"))
+
+    def __init__(self, llm: Llama):
+        self.llm = llm
+
+    def chat(self, messages: List[Dict[str, str]], cfg: Dict[str, Any]) -> str:
+        temperature = float(cfg.get("temperature", 0.6))
+        top_p = float(cfg.get("top_p", 0.9))
+        max_tokens = int(cfg.get("max_tokens", 1400))
+        resp = self.llm.create_chat_completion(
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+        )
+        return resp["choices"][0]["message"]["content"].strip()
 
 
-def init_llm(cfg: Dict[str, Any]) -> Llama:
+class ClaudeBackend:
+    """Claude API. Context window is large enough that even long sermon
+    transcripts fit in a single call, so the chunk/summarize map-reduce pass
+    is skipped entirely (preferred_chunk_chars is set high enough that
+    chunk_text_by_chars() returns a single chunk for any realistic sermon)."""
+
+    preferred_chunk_chars = int(os.environ.get("SERMON_CHUNK_CHARS", "500000"))
+
+    def __init__(self, client: "anthropic.Anthropic", model: str):
+        self.client = client
+        self.model = model
+
+    def chat(self, messages: List[Dict[str, str]], cfg: Dict[str, Any]) -> str:
+        # This model (claude-sonnet-5) rejects both `temperature` and
+        # `top_p` as deprecated request parameters -- neither is sent.
+        # cfg["temperature"]/cfg["top_p"] are still read by the local-Llama
+        # path; they're simply not meaningful here.
+        max_tokens = int(cfg.get("max_tokens", 1400))
+
+        # claude-sonnet-5 reasons by default, and thinking tokens count
+        # against max_tokens -- confirmed by production logs where thinking
+        # consumed 7999 of an 8000 max_tokens budget, leaving ~0 tokens for
+        # the actual article and producing an empty response. This model
+        # doesn't support the older thinking.type=enabled/budget_tokens
+        # scheme (confirmed via a live 400 from the API); it uses
+        # thinking.type=adaptive plus output_config.effort instead. "medium"
+        # balances article quality against leaving real room for output.
+        thinking_effort = cfg.get("thinking_effort", "medium")
+
+        system_parts = [m["content"] for m in messages if m["role"] == "system"]
+        chat_messages = [m for m in messages if m["role"] != "system"]
+
+        resp = self.client.messages.create(
+            model=self.model,
+            system="\n\n".join(system_parts),
+            messages=chat_messages,
+            max_tokens=max_tokens,
+            thinking={"type": "adaptive"},
+            output_config={"effort": thinking_effort},
+        )
+        text = "".join(block.text for block in resp.content if block.type == "text").strip()
+        if not text:
+            block_types = [block.type for block in resp.content]
+            print(
+                f"[ClaudeBackend] Empty text result. stop_reason={resp.stop_reason} "
+                f"content_block_types={block_types} usage={resp.usage}"
+            )
+        return text
+
+
+def init_llm(cfg: Dict[str, Any]):
+    # Imported lazily so worker deployments that only use ClaudeBackend never
+    # need llama-cpp-python installed (it requires a from-source compile).
+    from llama_cpp import Llama
+
     model_path = cfg["model_path"]
     if not model_path or not os.path.exists(model_path):
         raise RuntimeError(f"LLM model_path does not exist: {model_path}")
@@ -438,102 +521,119 @@ def init_llm(cfg: Dict[str, Any]) -> Llama:
     )
 
 
-# ---- YAML article parsing/repair ----
-def _extract_yaml_block(text: str) -> str:
+def build_backend(cfg: Dict[str, Any]):
+    """
+    Claude if ANTHROPIC_API_KEY is set (fast, no local model load), else the
+    local GGUF model (always available, slower on CPU). Local-only fields
+    like model_path are left unvalidated until the local path is actually
+    needed, so a Claude-backed run never requires the model file to exist.
+    """
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        model = os.environ.get("CLAUDE_MODEL", cfg.get("claude_model", "claude-sonnet-5"))
+        print(f"[{utc_now_iso()}] ANTHROPIC_API_KEY set; using Claude ({model}) for article generation.")
+        client = anthropic.Anthropic(api_key=anthropic_key)
+        return ClaudeBackend(client, model)
+
+    print(f"[{utc_now_iso()}] No ANTHROPIC_API_KEY; using local LLM ({cfg.get('model_path')}).")
+    return LocalLlamaBackend(init_llm(cfg))
+
+
+# ---- Article parsing/repair: '---' YAML frontmatter + markdown body ----
+_FRONTMATTER_RE = re.compile(r"^---\s*$\n(?P<frontmatter>.*?)\n^---\s*$\n", re.MULTILINE | re.DOTALL)
+
+
+def parse_article_markdown(text: str) -> Tuple[Dict[str, Any], str]:
+    """
+    Parse the model's '---'-delimited YAML frontmatter + markdown body
+    document. Only the first two standalone '---' lines are treated as
+    delimiters (matched via MULTILINE anchoring, not a raw substring split),
+    so a markdown horizontal rule later in the article body doesn't get
+    mistaken for a frontmatter boundary.
+    """
     t = text.strip().replace("\t", "  ")
 
-    # Strip markdown fences if present
+    # Strip markdown fences if the whole document got wrapped in one.
     if t.startswith("```"):
-        # drop first fence line
         t = t.split("\n", 1)[-1]
-        # drop trailing fence
         if "```" in t:
             t = t.rsplit("```", 1)[0].strip()
 
-    # Strip common leading chatter
-    lower = t.lower()
-    for prefix in ["here is the yaml:", "yaml:", "output:", "result:"]:
-        if lower.startswith(prefix):
-            t = t[len(prefix):].lstrip()
-            break
+    m = _FRONTMATTER_RE.match(t)
+    if not m:
+        raise ValueError("Could not find a '---'-delimited frontmatter block at the start of the document.")
 
-    return t
+    frontmatter = yaml.safe_load(m.group("frontmatter"))
+    if not isinstance(frontmatter, dict):
+        raise ValueError("Frontmatter did not parse into a dict/object.")
 
+    body = t[m.end():].strip()
+    if not body:
+        raise ValueError("Article body is empty.")
 
-def parse_article_yaml(yaml_text: str) -> Dict[str, Any]:
-    data = yaml.safe_load(_extract_yaml_block(yaml_text))
-    if not isinstance(data, dict):
-        raise ValueError("YAML did not parse into a dict/object.")
-    return data
+    return frontmatter, body
 
 
-def repair_yaml(llm: Llama, bad: str, cfg: Dict[str, Any]) -> str:
-    repair_system = (
-        "You are a strict YAML formatter. Output ONLY valid YAML. "
-        "No markdown. No commentary. No extra keys."
-    )
+_REPAIR_SCHEMA_DESCRIPTION = """REQUIRED FORMAT (a single '---'-delimited YAML frontmatter block, then the markdown article, exactly):
 
-    repair_user = f"""Convert the following into VALID YAML that matches this EXACT schema and key names.
-
-REQUIRED YAML (use these keys EXACTLY, lowercase with underscores):
-title_options:
-  - "..."
-  - "..."
-  - "..."
-  - "..."
-  - "..."
-chosen_title: "..."
-meta_title: "..."
-meta_description: "..."
+---
+title: "..."
 slug: "kebab-case-slug"
-primary_keyword: "..."
-secondary_keywords:
+meta_description: "140-160 chars"
+focus_keyword: "..."
+keywords: ["...", "..."]
+primary_passage: "Book Chapter:Verse-Verse"
+scripture_references: ["Book Chapter:Verse", "..."]
+preacher: "..."
+preached_on: "..."
+word_count: 1800
+needs_review: true
+alternate_titles:
   - "..."
   - "..."
   - "..."
   - "..."
   - "..."
-featured_image_prompt: "..."
-outline:
-  - "H2 ..."
-  - "H3 ..."
-article_html: |
-  <h2>...</h2>
-  <p>...</p>
-scripture_references:
-  - "John 3:16 KJV"
-takeaway_points:
   - "..."
-  - "..."
-  - "..."
-  - "..."
-  - "..."
+reviewer_notes:
+  corrections:
+    - "..."
+  additions:
+    - "..."
+  flags:
+    - "..."
+---
+
+# {title}
+
+{the article body in markdown, starting with the H1}
 
 RULES (non-negotiable):
-- Output ONLY YAML.
-- Do NOT output any free-floating title lines. Every line must belong to a key/value.
-- Use exactly 2 spaces indentation. No tabs.
-- article_html MUST use the block scalar (|) exactly as shown.
-- Keep content complete; do not truncate.
+- Output ONLY the frontmatter block followed by the markdown article. No commentary before or after.
+- The frontmatter block must be delimited by '---' on its own line, both above and below it.
+- If a reviewer_notes category is empty, use an empty list -- never omit the key.
+- Keep content complete; do not truncate."""
 
-INPUT TO FIX:
-{bad}
-"""
-    return llm_chat(
-        llm,
+
+def repair_article_markdown(backend, bad: str, cfg: Dict[str, Any]) -> str:
+    repair_system = (
+        "You are a strict formatter. Output ONLY the '---'-delimited YAML "
+        "frontmatter block followed by the markdown article body. No "
+        "commentary, no extra keys, no markdown fences around the whole "
+        "thing."
+    )
+    repair_user = f"{_REPAIR_SCHEMA_DESCRIPTION}\n\nINPUT TO FIX:\n{bad}\n"
+    return backend.chat(
         [
             {"role": "system", "content": repair_system},
             {"role": "user", "content": repair_user},
         ],
-        {**cfg, "temperature": 0.0, "top_p": 1.0, "max_tokens": 2600},
+        {**cfg, "temperature": 0.0, "top_p": 1.0, "max_tokens": 8000},
     )
 
 
-def normalize_article_schema(article: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Make the model output safe + predictable for downstream usage.
-    No FAQ. YAML-first output is converted to dict then normalized.
-    """
+def normalize_article_frontmatter(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
+    """Make the model's frontmatter safe + predictable for downstream usage."""
 
     def ensure_str(x) -> str:
         return x if isinstance(x, str) else ("" if x is None else str(x))
@@ -542,60 +642,102 @@ def normalize_article_schema(article: Dict[str, Any]) -> Dict[str, Any]:
         return x if isinstance(x, list) else []
 
     defaults = {
-        "title_options": [],
-        "chosen_title": "",
-        "meta_title": "",
-        "meta_description": "",
+        "title": "",
         "slug": "",
-        "primary_keyword": "",
-        "secondary_keywords": [],
-        "featured_image_prompt": "",
-        "outline": [],
-        "article_html": "",
+        "meta_description": "",
+        "focus_keyword": "",
+        "keywords": [],
+        "primary_passage": "",
         "scripture_references": [],
-        "takeaway_points": [],
+        "preacher": "",
+        "preached_on": "",
+        "word_count": 0,
+        "needs_review": True,
+        "alternate_titles": [],
+        "reviewer_notes": {},
     }
 
     for k, v in defaults.items():
-        if k not in article or article[k] is None:
-            article[k] = v
+        if k not in frontmatter or frontmatter[k] is None:
+            frontmatter[k] = v
 
-    for k in ["title_options", "secondary_keywords", "outline", "scripture_references", "takeaway_points"]:
-        article[k] = ensure_list(article.get(k))
+    for k in ["keywords", "scripture_references", "alternate_titles"]:
+        frontmatter[k] = ensure_list(frontmatter.get(k))
 
-    for k in [
-        "chosen_title", "meta_title", "meta_description", "slug",
-        "primary_keyword", "featured_image_prompt", "article_html"
-    ]:
-        article[k] = ensure_str(article.get(k))
+    for k in ["title", "slug", "meta_description", "focus_keyword", "primary_passage", "preacher", "preached_on"]:
+        frontmatter[k] = ensure_str(frontmatter.get(k))
 
-    # light enforcement
-    if len(article["title_options"]) > 5:
-        article["title_options"] = article["title_options"][:5]
-    if len(article["takeaway_points"]) > 5:
-        article["takeaway_points"] = article["takeaway_points"][:5]
+    frontmatter["needs_review"] = bool(frontmatter.get("needs_review"))
 
-    return article
+    try:
+        frontmatter["word_count"] = int(frontmatter.get("word_count") or 0)
+    except (TypeError, ValueError):
+        frontmatter["word_count"] = 0
+
+    reviewer_notes = frontmatter.get("reviewer_notes")
+    if not isinstance(reviewer_notes, dict):
+        reviewer_notes = {}
+    for k in ["corrections", "additions", "flags"]:
+        reviewer_notes[k] = ensure_list(reviewer_notes.get(k))
+    frontmatter["reviewer_notes"] = reviewer_notes
+
+    if len(frontmatter["alternate_titles"]) > 7:
+        frontmatter["alternate_titles"] = frontmatter["alternate_titles"][:7]
+
+    return frontmatter
 
 
-def llm_generate_article(llm: Llama, sermon_text: str, cfg: Dict[str, Any], job_dir: str) -> Dict[str, Any]:
+MIN_ARTICLE_WORD_COUNT = int(os.environ.get("MIN_ARTICLE_WORD_COUNT", "800"))
+MIN_RAW_OUTPUT_CHARS = int(os.environ.get("MIN_RAW_OUTPUT_CHARS", "500"))
+
+
+def llm_generate_article(
+    backend, sermon_text: str, cfg: Dict[str, Any], job_dir: str, style_guide: str = ""
+) -> Dict[str, Any]:
     """
-    YAML-first, context-safe generation:
+    Frontmatter-first, context-safe generation:
     - If sermon is long, chunk it and summarize chunks first (map step).
     - Cache the combined notes to notes.txt so retries don't redo chunking.
-    - Then generate the final YAML article from the combined notes (reduce step).
-    - If YAML is invalid, do one YAML repair pass and parse again.
-    - Enforces first-person pastor voice regardless of prompt drift.
+    - Generate the final frontmatter+markdown article from the combined notes (reduce step).
+    - If parsing fails, do one repair pass and parse again.
+    - Every scripture blockquote is verified against the bundled KJV text
+      afterward (see scripture_lookup.verify_and_correct_scripture) --
+      corrected in place if it resolves, dropped and flagged if it doesn't.
+      This runs on whichever code path below actually produces the final
+      article, via the shared _finalize() helper.
     """
     os.makedirs(job_dir, exist_ok=True)
 
     notes_path = os.path.join(job_dir, "notes.txt")
-    raw_yaml_path = os.path.join(job_dir, "article_raw.yaml")
-    repaired_yaml_path = os.path.join(job_dir, "article_repaired.yaml")
+    raw_path = os.path.join(job_dir, "article_raw.md")
+    repaired_path = os.path.join(job_dir, "article_repaired.md")
 
     def _fill_template(template: str, text: str) -> str:
         # Avoid Python .format() entirely to prevent brace/key errors.
-        return template.replace("{sermon_text}", text)
+        return template.replace("{sermon_text}", text).replace("{style_guide}", style_guide)
+
+    def _finalize(frontmatter: Dict[str, Any], body: str) -> Dict[str, Any]:
+        frontmatter = normalize_article_frontmatter(frontmatter)
+        if kjv_available():
+            corrected_body, surviving_refs, flags = verify_and_correct_scripture(body)
+            frontmatter["scripture_references"] = surviving_refs
+            frontmatter["reviewer_notes"]["flags"] = frontmatter["reviewer_notes"]["flags"] + flags
+            if flags:
+                frontmatter["needs_review"] = True
+            frontmatter["article_markdown"] = corrected_body
+        else:
+            # No bundled KJV dataset available -- trust the model's own
+            # citations as-is rather than running verification against an
+            # empty dataset (which would incorrectly strip every quote).
+            # Flagged so this is visible in the editorial review, not silent.
+            frontmatter["reviewer_notes"]["flags"] = frontmatter["reviewer_notes"]["flags"] + [
+                "Scripture citations were NOT independently verified against "
+                "a KJV text (bundled dataset unavailable) -- double-check "
+                "quotations before publishing."
+            ]
+            frontmatter["needs_review"] = True
+            frontmatter["article_markdown"] = body
+        return frontmatter
 
     # --- Step 1: get or build combined notes ---
     combined_notes: str = ""
@@ -607,7 +749,7 @@ def llm_generate_article(llm: Llama, sermon_text: str, cfg: Dict[str, Any], job_
     else:
         chunks = chunk_text_by_chars(
             sermon_text,
-            max_chars=int(os.environ.get("SERMON_CHUNK_CHARS", "5000"))
+            max_chars=backend.preferred_chunk_chars
         )
 
         if len(chunks) == 1:
@@ -617,8 +759,7 @@ def llm_generate_article(llm: Llama, sermon_text: str, cfg: Dict[str, Any], job_
             notes_all: List[str] = []
             for i, ch in enumerate(chunks, start=1):
                 print(f"[{utc_now_iso()}] Summarizing chunk {i}/{len(chunks)}...")
-                chunk_notes = llm_chat(
-                    llm,
+                chunk_notes = backend.chat(
                     [
                         {"role": "system", "content": CHUNK_SUMMARY_SYSTEM},
                         {"role": "user", "content": ch},
@@ -632,94 +773,103 @@ def llm_generate_article(llm: Llama, sermon_text: str, cfg: Dict[str, Any], job_
                 f.write(combined_notes)
             print(f"[{utc_now_iso()}] Wrote notes cache: {notes_path}")
 
-
-    def _regen_missing_html(notes_text: str) -> Dict[str, Any]:
-        fix_system = "You output ONLY valid YAML matching the required schema."
-        fix_user = f"""Your prior output was missing article_html (or it was empty/too short).
-Return VALID YAML with the EXACT required keys, and ensure article_html is a long 5–10 minute read (target 1,200–1,800 words).
-Use only allowed HTML tags (<h2>, <h3>, <p>, <ul>, <li>, <blockquote>).
-Return ONLY YAML.
-
-Use these sermon notes:
-{notes_text}
-"""
-        y = llm_chat(
-            llm,
-            [{"role": "system", "content": fix_system}, {"role": "user", "content": fix_user}],
-            {**cfg, "temperature": 0.2, "top_p": 0.9, "max_tokens": 2600},
+    def _regen_short_article(notes_text: str) -> Dict[str, Any]:
+        fix_system = "You output ONLY the '---'-delimited frontmatter block followed by the markdown article."
+        fix_user = (
+            "Your prior output was missing the article body, or it was far shorter than the "
+            "1,800-2,600 word target. Return the full format again, with a complete article this time.\n\n"
+            f"{_REPAIR_SCHEMA_DESCRIPTION}\n\nUse these sermon notes:\n{notes_text}\n"
         )
-        obj = normalize_article_schema(parse_article_yaml(y))
-        return obj
+        y = backend.chat(
+            [{"role": "system", "content": fix_system}, {"role": "user", "content": fix_user}],
+            {**cfg, "temperature": 0.2, "top_p": 0.9, "max_tokens": 8000},
+        )
+        frontmatter, body = parse_article_markdown(y)
+        return _finalize(frontmatter, body)
 
-    # --- Step 2: Generate final YAML article ---
+    # --- Step 2: Generate final article ---
     chunks = chunk_text_by_chars(
         sermon_text,
-        max_chars=int(os.environ.get("SERMON_CHUNK_CHARS", "5000"))
+        max_chars=backend.preferred_chunk_chars
     )
 
-    if len(chunks) == 1:
-        user_prompt = _fill_template(USER_PROMPT_TEMPLATE, chunks[0][:120000])
-        user_prompt = FIRST_PERSON_ENFORCER_USER + "\n" + user_prompt
+    def _generate_once() -> str:
+        if len(chunks) == 1:
+            user_prompt = _fill_template(USER_PROMPT_TEMPLATE, chunks[0][:120000])
+            print(f"[{utc_now_iso()}] Generating article from sermon text (single chunk)...")
+            return backend.chat(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                cfg
+            )
+        else:
+            reduced_input = (
+                "Use the following sermon notes (summarized from the full transcript) to write the article.\n\n"
+                + combined_notes
+            )
+            final_prompt = _fill_template(USER_PROMPT_TEMPLATE, reduced_input[:120000])
+            print(f"[{utc_now_iso()}] Generating final article from summarized notes...")
+            return backend.chat(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": final_prompt},
+                ],
+                # Structured output is more reliable at lower temperature
+                {**cfg, "temperature": min(float(cfg.get("temperature", 0.6)), 0.4)}
+            )
 
-        print(f"[{utc_now_iso()}] Generating article YAML from sermon text (single chunk)...")
-        content = llm_chat(
-            llm,
-            [
-                {"role": "system", "content": FIRST_PERSON_ENFORCER_SYSTEM + SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            cfg
-        )
-    else:
-        reduced_input = (
-            "Use the following sermon notes (summarized from the full transcript) to write the article.\n\n"
-            + combined_notes
-        )
-        final_prompt = _fill_template(USER_PROMPT_TEMPLATE, reduced_input[:120000])
-        final_prompt = FIRST_PERSON_ENFORCER_USER + "\n" + final_prompt
+    content = _generate_once()
 
-        print(f"[{utc_now_iso()}] Generating final article YAML from summarized notes...")
-        content = llm_chat(
-            llm,
-            [
-                {"role": "system", "content": FIRST_PERSON_ENFORCER_SYSTEM + SYSTEM_PROMPT},
-                {"role": "user", "content": final_prompt},
-            ],
-            # YAML is more reliable with lower temperature
-            {**cfg, "temperature": min(float(cfg.get("temperature", 0.6)), 0.4)}
-        )
+    # A near-empty response (e.g. a dropped/truncated connection returning a
+    # response object with no usable text -- seen in practice, not just
+    # theoretical) is not something to "repair": there's no real article in
+    # it to fix, and asking the model to reformat near-nothing just invites
+    # it to fabricate a plausible-looking placeholder article from a
+    # different, invented sermon. Retry the real generation call once
+    # instead of routing this into the repair path.
+    if len(content.strip()) < MIN_RAW_OUTPUT_CHARS:
+        print(f"[{utc_now_iso()}] Raw output was near-empty ({len(content.strip())} chars); retrying generation once...")
+        content = _generate_once()
 
-    # Save raw YAML output
+    # Save raw output
     try:
-        with open(raw_yaml_path, "w", encoding="utf-8") as f:
+        with open(raw_path, "w", encoding="utf-8") as f:
             f.write(content)
-        print(f"[{utc_now_iso()}] Wrote raw LLM YAML output: {raw_yaml_path}")
+        print(f"[{utc_now_iso()}] Wrote raw LLM output: {raw_path}")
     except Exception:
         pass
 
-    # --- Step 3: Parse YAML with one repair attempt ---
+    if len(content.strip()) < MIN_RAW_OUTPUT_CHARS:
+        raise RuntimeError(
+            f"LLM returned near-empty output twice in a row ({len(content.strip())} chars) -- "
+            "not attempting a repair pass against effectively nothing."
+        )
+
+    # --- Step 3: Parse with one repair attempt ---
     try:
-        article_obj = normalize_article_schema(parse_article_yaml(content))
-        if len(article_obj.get("article_html", "").strip()) < 200:
-            print(f"[{utc_now_iso()}] article_html was empty/too short; regenerating once...")
-            article_obj = _regen_missing_html(combined_notes[:120000])
-        return article_obj
+        frontmatter, body = parse_article_markdown(content)
+        if len(body.split()) < MIN_ARTICLE_WORD_COUNT:
+            print(f"[{utc_now_iso()}] Article body was too short ({len(body.split())} words); regenerating once...")
+            return _regen_short_article(combined_notes[:120000])
+        return _finalize(frontmatter, body)
     except Exception as e:
-        print(f"[{utc_now_iso()}] LLM output was not valid YAML; attempting one repair pass... ({e})")
-        fixed = repair_yaml(llm, content, cfg)
+        print(f"[{utc_now_iso()}] LLM output did not parse; attempting one repair pass... ({e})")
+        fixed = repair_article_markdown(backend, content, cfg)
 
         try:
-            with open(repaired_yaml_path, "w", encoding="utf-8") as f:
+            with open(repaired_path, "w", encoding="utf-8") as f:
                 f.write(fixed)
-            print(f"[{utc_now_iso()}] Wrote repaired LLM YAML output: {repaired_yaml_path}")
+            print(f"[{utc_now_iso()}] Wrote repaired LLM output: {repaired_path}")
         except Exception:
             pass
 
-        article_obj = normalize_article_schema(parse_article_yaml(fixed))
-        if len(article_obj.get("article_html", "").strip()) < 200:
-            print(f"[{utc_now_iso()}] article_html was empty/too short after repair; regenerating once...")
-            article_obj = _regen_missing_html(combined_notes[:120000])
-        return article_obj
+        frontmatter, body = parse_article_markdown(fixed)
+        if len(body.split()) < MIN_ARTICLE_WORD_COUNT:
+            print(f"[{utc_now_iso()}] Article body was too short after repair ({len(body.split())} words); regenerating once...")
+            return _regen_short_article(combined_notes[:120000])
+        return _finalize(frontmatter, body)
 
 
 def write_json(path: str, obj: Any):
@@ -938,22 +1088,29 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
     else:
         llm_cfg = cfg["llm"].copy()
         llm_cfg["model_path"] = env_or(llm_cfg.get("model_path", ""), "LLM_MODEL_PATH")
-        llm = init_llm(llm_cfg)
-        article = llm_generate_article(llm, sermon_text, llm_cfg, job_dir)
+        style_guide_path = env_or(llm_cfg.get("style_guide_path", ""), "STYLE_GUIDE_PATH")
+        style_guide = ""
+        if style_guide_path and os.path.exists(style_guide_path):
+            with open(style_guide_path, "r", encoding="utf-8") as f:
+                style_guide = f.read()
+        elif style_guide_path:
+            print(f"[{utc_now_iso()}] WARNING: style_guide_path set but not found: {style_guide_path}")
+        backend = build_backend(llm_cfg)
+        article = llm_generate_article(backend, sermon_text, llm_cfg, job_dir, style_guide=style_guide)
         write_json(article_json_path, article)
 
     # Ensure we have a standalone HTML file (even if we didn't run LLM this time)
     if not file_exists_nonempty(html_path):
+        article_body_html = markdown.markdown(article.get("article_markdown", ""))
         html_doc = f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>{article.get("chosen_title","Sermon Article")}</title>
+<title>{article.get("title","Sermon Article")}</title>
 <meta name="description" content="{article.get("meta_description","")}"/>
 </head>
 <body>
-<h1>{article.get("chosen_title","")}</h1>
-{article.get("article_html","")}
+{article_body_html}
 </body>
 </html>
 """
@@ -970,11 +1127,11 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
             print(f"[{utc_now_iso()}] FORCE_PDF enabled; re-rendering PDF: {pdf_path}")
         render_pdf(
             pdf_path=pdf_path,
-            title=article.get("chosen_title", "Sermon Article"),
+            title=article.get("title", "Sermon Article"),
             meta_description=article.get("meta_description", ""),
-            html_body=article.get("article_html", ""),
+            article_markdown=article.get("article_markdown", ""),
             scripture_refs=article.get("scripture_references", []),
-            takeaways=article.get("takeaway_points", []),
+            reviewer_notes=article.get("reviewer_notes", {}),
         )
 
     # Mark processed only once we have the PDF output

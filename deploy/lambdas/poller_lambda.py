@@ -8,9 +8,12 @@ units/call) in favor of channels.list + playlistItems.list + videos.list
 (1 unit each) -- at a 15-minute poll interval, search.list would blow the
 default 10,000 unit/day quota.
 
-Deployment note: this Lambda's zip must also include storage.py from the
-project root (StateStore) alongside this file, since it reuses the same
-DynamoDB-backed state store the worker uses.
+Deployment note: this Lambda's zip must also include storage.py and
+bootstrap.sh from the project root/deploy dir alongside this file --
+storage.py because it reuses the same DynamoDB-backed state store the
+worker uses, and bootstrap.sh because it's shipped as EC2 user-data (this
+is a stock AMI, not a custom-baked one, so nothing runs at boot unless we
+hand it the script directly).
 """
 import os
 import json
@@ -24,13 +27,22 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 YOUTUBE_API_KEY_SECRET_ARN = os.environ["YOUTUBE_API_KEY_SECRET_ARN"]
 AMI_ID = os.environ["WORKER_AMI_ID"]
-INSTANCE_TYPE = os.environ.get("WORKER_INSTANCE_TYPE", "g4dn.xlarge")
+INSTANCE_TYPE = os.environ.get("WORKER_INSTANCE_TYPE", "c6i.xlarge")
 SUBNET_ID = os.environ["WORKER_SUBNET_ID"]
 SECURITY_GROUP_ID = os.environ["WORKER_SECURITY_GROUP_ID"]
 WORKER_INSTANCE_PROFILE_ARN = os.environ["WORKER_INSTANCE_PROFILE_ARN"]
 MAX_SPOT_PRICE = os.environ.get("WORKER_MAX_SPOT_PRICE")  # optional, empty = on-demand cap price
+USE_SPOT = os.environ.get("WORKER_USE_SPOT", "true").lower() == "true"
 STALE_AFTER_SECONDS = int(os.environ.get("STALE_AFTER_SECONDS", str(3 * 3600)))
 RECENT_VIDEOS_TO_CHECK = int(os.environ.get("RECENT_VIDEOS_TO_CHECK", "10"))
+
+_BOOTSTRAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bootstrap.sh")
+with open(_BOOTSTRAP_PATH, "r", encoding="utf-8") as _f:
+    # Raw text, NOT pre-base64-encoded -- boto3's run_instances encodes
+    # UserData itself. Pre-encoding here double-encodes it, so cloud-init
+    # receives base64 text instead of a real script and silently never
+    # runs it (no error, no log -- just a normal boot with no bootstrap).
+    _BOOTSTRAP_USER_DATA = _f.read()
 
 _secrets = boto3.client("secretsmanager", region_name=REGION)
 _ec2 = boto3.client("ec2", region_name=REGION)
@@ -91,10 +103,7 @@ def _launch_worker(video_id: str, title: str, duration_seconds: float, end_time:
         "SecurityGroupIds": [SECURITY_GROUP_ID],
         "IamInstanceProfile": {"Arn": WORKER_INSTANCE_PROFILE_ARN},
         "InstanceInitiatedShutdownBehavior": "terminate",
-        "InstanceMarketOptions": {
-            "MarketType": "spot",
-            "SpotOptions": {"SpotInstanceType": "one-time"},
-        },
+        "UserData": _BOOTSTRAP_USER_DATA,
         "TagSpecifications": [{
             "ResourceType": "instance",
             "Tags": [
@@ -110,6 +119,11 @@ def _launch_worker(video_id: str, title: str, duration_seconds: float, end_time:
             ],
         }],
     }
+    if USE_SPOT:
+        kwargs["InstanceMarketOptions"] = {
+            "MarketType": "spot",
+            "SpotOptions": {"SpotInstanceType": "one-time"},
+        }
     if MAX_SPOT_PRICE:
         kwargs["InstanceMarketOptions"]["SpotOptions"]["MaxPrice"] = MAX_SPOT_PRICE
 
@@ -124,15 +138,23 @@ def lambda_handler(event, context):
 
     # ---- Reclaim anything stuck (spot reclaimed, worker crashed) or retry
     # failed jobs still under the attempt limit, before looking for new work.
+    # Launch failures (e.g. transient spot InsufficientInstanceCapacity) are
+    # caught per-video so one bad launch doesn't abort the whole poll and
+    # block every other video in the batch -- it just stays QUEUED and gets
+    # picked up again on a later poll.
     for item in store.list_active():
         vid = item["video_id"]
         if store.reclaim_if_stale(vid, STALE_AFTER_SECONDS):
             print(f"Reclaimed stale job {vid} (was {item.get('status')})")
-            instance_id = _launch_worker(
-                vid, item.get("title", ""),
-                float(item.get("video_duration_seconds", 0) or 0),
-                item.get("actual_end_time", ""),
-            )
+            try:
+                instance_id = _launch_worker(
+                    vid, item.get("title", ""),
+                    float(item.get("video_duration_seconds", 0) or 0),
+                    item.get("actual_end_time", ""),
+                )
+            except Exception as e:
+                print(f"Launch failed for reclaimed job {vid}: {e}")
+                continue
             store.mark_launching(vid, instance_id)
 
     # ---- Low-quota check for new work: channels.list (1) + playlistItems.list
@@ -164,7 +186,11 @@ def lambda_handler(event, context):
         # above, in progress, or done).
 
         if should_launch:
-            instance_id = _launch_worker(video_id, title, duration_seconds, end_time)
+            try:
+                instance_id = _launch_worker(video_id, title, duration_seconds, end_time)
+            except Exception as e:
+                print(f"Launch failed for new job {video_id}: {e}")
+                continue
             store.mark_launching(video_id, instance_id)
             launched.append(video_id)
             print(f"Launched worker {instance_id} for video {video_id} ({title!r})")

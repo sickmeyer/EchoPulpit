@@ -1,4 +1,6 @@
 config.yaml
+.env.local
+cookies.txt
 output/
 models/
 *.db

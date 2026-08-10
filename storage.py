@@ -86,10 +86,12 @@ class StateStore:
         resp = self.table.update_item(
             Key={"video_id": video_id},
             UpdateExpression=(
-                "SET #status = :failed, error = :err, completed_at = :ts "
+                "SET #status = :failed, #error = :err, completed_at = :ts "
                 "ADD failure_count :one"
             ),
-            ExpressionAttributeNames={"#status": "status"},
+            # "error" is a DynamoDB reserved keyword and can't be used
+            # directly in an UpdateExpression -- needs an alias like #status.
+            ExpressionAttributeNames={"#status": "status", "#error": "error"},
             ExpressionAttributeValues={
                 ":failed": FAILED,
                 ":err": str(error)[:2000],

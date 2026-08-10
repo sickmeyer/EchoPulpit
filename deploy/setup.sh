@@ -8,24 +8,26 @@
 # variables below (and the IAM policy JSON files it substitutes into)
 # before executing anything against a real AWS account.
 #
-# Order of operations matters: the AMI must already exist (built via
-# ../packer/echopulpit-worker.pkr.hcl) before you run this, since the poller
-# Lambda's IAM policy is scoped to a specific AMI ID.
+# v1 uses a STOCK Amazon Linux 2023 AMI (resolved dynamically below via the
+# public SSM parameter), not a Packer-baked custom AMI -- see bootstrap.sh
+# for why (Claude-primary means no local model to bake in, so boot-time
+# install is cheap enough that maintaining a custom AMI isn't worth it).
+# bootstrap.sh is shipped as this instance's EC2 user-data by poller_lambda.py.
 set -euo pipefail
 
 # ---- Required configuration (edit these or export as env vars first) ----
 : "${AWS_REGION:?set AWS_REGION, e.g. us-east-1}"
 : "${CHANNEL_ID:?set CHANNEL_ID (the YouTube channel ID, not @handle)}"
 : "${YOUTUBE_API_KEY:?set YOUTUBE_API_KEY (used once, to seed Secrets Manager)}"
+: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY (used once, to seed Secrets Manager)}"
 : "${ARTIFACTS_BUCKET:?set ARTIFACTS_BUCKET (S3 bucket name, must be globally unique)}"
 : "${SUBNET_ID:?set SUBNET_ID (worker instances launch here; needs internet access)}"
 : "${SECURITY_GROUP_ID:?set SECURITY_GROUP_ID for worker instances}"
-: "${AMI_ID:?set AMI_ID from the Packer build output (../packer/echopulpit-worker.pkr.hcl)}"
 : "${SES_SENDER_ADDRESS:?set SES_SENDER_ADDRESS (must be a verified SES identity)}"
 : "${NOTIFY_RECIPIENT_ADDRESS:?set NOTIFY_RECIPIENT_ADDRESS, e.g. josh@missionlaunch.us}"
 
 TABLE_NAME="${TABLE_NAME:-EchoPulpitJobs}"
-WORKER_INSTANCE_TYPE="${WORKER_INSTANCE_TYPE:-g4dn.xlarge}"
+WORKER_INSTANCE_TYPE="${WORKER_INSTANCE_TYPE:-c6i.xlarge}"
 WORKER_ROLE_NAME="${WORKER_ROLE_NAME:-echopulpit-worker-instance-role}"
 POLLER_ROLE_NAME="${POLLER_ROLE_NAME:-echopulpit-poller-lambda-role}"
 NOTIFIER_ROLE_NAME="${NOTIFIER_ROLE_NAME:-echopulpit-notifier-lambda-role}"
@@ -96,7 +98,8 @@ TABLE_STREAM_ARN="$(aws dynamodb describe-table --table-name "$TABLE_NAME" --reg
 
 # ==========================================================================
 # 3) Secrets Manager: YouTube API key (worker instances never see this --
-#    only the poller Lambda reads it)
+#    only the poller Lambda reads it) + Anthropic API key (only the worker
+#    reads this, at boot, in bootstrap.sh)
 # ==========================================================================
 SECRET_NAME="echopulpit/youtube-api-key"
 if ! aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$REGION" >/dev/null 2>&1; then
@@ -109,6 +112,24 @@ else
   echo "Secret $SECRET_NAME already exists, skipping create (not overwriting its value)"
   YOUTUBE_API_KEY_SECRET_ARN="$(aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$REGION" --query ARN --output text)"
 fi
+
+ANTHROPIC_SECRET_NAME="echopulpit/anthropic-api-key"
+if ! aws secretsmanager describe-secret --secret-id "$ANTHROPIC_SECRET_NAME" --region "$REGION" >/dev/null 2>&1; then
+  echo "Creating Secrets Manager secret $ANTHROPIC_SECRET_NAME"
+  aws secretsmanager create-secret --name "$ANTHROPIC_SECRET_NAME" --region "$REGION" \
+    --secret-string "$ANTHROPIC_API_KEY" >/dev/null
+else
+  echo "Secret $ANTHROPIC_SECRET_NAME already exists, skipping create (not overwriting its value)"
+fi
+
+# ==========================================================================
+# 3b) Resolve the latest stock Amazon Linux 2023 AMI ID via the public SSM
+#     parameter (no custom AMI to build/maintain for v1).
+# ==========================================================================
+AMI_ID="$(aws ssm get-parameters --region "$REGION" \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query 'Parameters[0].Value' --output text)"
+echo "Using stock AMI: $AMI_ID"
 
 # ==========================================================================
 # 4) IAM: worker instance role + instance profile
@@ -172,6 +193,7 @@ POLLER_BUILD="${BUILD_DIR}/poller"
 rm -rf "$POLLER_BUILD" && mkdir -p "$POLLER_BUILD"
 cp "${LAMBDA_DIR}/poller_lambda.py" "$POLLER_BUILD/"
 cp "${SCRIPT_DIR}/../storage.py" "$POLLER_BUILD/"
+cp "${SCRIPT_DIR}/bootstrap.sh" "$POLLER_BUILD/"
 python3 -m pip install --target "$POLLER_BUILD" \
   google-api-python-client google-auth google-auth-httplib2 httplib2 boto3 --quiet
 (cd "$POLLER_BUILD" && zip -qr "${BUILD_DIR}/poller-lambda.zip" .)
@@ -244,5 +266,6 @@ echo ""
 echo "Remaining manual steps:"
 echo "  1. Verify the SES sender identity: aws ses verify-email-identity --email-address $SES_SENDER_ADDRESS --region $REGION"
 echo "  2. If your SES account is still in the sandbox, also verify the recipient: $NOTIFY_RECIPIENT_ADDRESS"
-echo "  3. Confirm the worker AMI ($AMI_ID) was built from ../packer/echopulpit-worker.pkr.hcl"
+echo "  3. Sync app code to s3://$ARTIFACTS_BUCKET/app/ (sermon_pipeline.py, prompts.py, sermon_heuristics.py,"
+echo "     render_pdf.py, storage.py, scripture_lookup.py, requirements-worker.txt, config.yaml, prompts/style_guide.md)"
 echo "  4. Seed a test job to confirm the end-to-end path (see README.md 'Verification')"

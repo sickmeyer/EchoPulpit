@@ -57,24 +57,40 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str):
     pdf_key = f"{prefix}sermon-article.pdf"
 
     meta_description = ""
-    takeaways = []
+    needs_review = True
+    reviewer_notes = {}
     try:
         obj = _s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=article_key)
         article = json.loads(obj["Body"].read())
         meta_description = article.get("meta_description", "")
-        takeaways = article.get("takeaway_points", [])
+        needs_review = bool(article.get("needs_review", True))
+        reviewer_notes = article.get("reviewer_notes") or {}
     except Exception as e:
         print(f"Could not read article.json for {video_id}: {e}")
 
+    flags = reviewer_notes.get("flags") or []
+    corrections = reviewer_notes.get("corrections") or []
+    additions = reviewer_notes.get("additions") or []
+
     msg = MIMEMultipart()
-    msg["Subject"] = title or f"EchoPulpit article ready: {video_id}"
+    subject = title or f"EchoPulpit article ready: {video_id}"
+    if needs_review:
+        subject = f"[Review needed] {subject}"
+    msg["Subject"] = subject
     msg["From"] = SENDER
     msg["To"] = RECIPIENT
 
     body_lines = [meta_description, ""]
-    if takeaways:
-        body_lines.append("Key takeaways:")
-        body_lines.extend(f"- {t}" for t in takeaways)
+    if flags:
+        body_lines.append("Flagged for your review before publishing:")
+        body_lines.extend(f"- {f}" for f in flags)
+        body_lines.append("")
+    if corrections or additions:
+        body_lines.append(
+            f"Automatically made {len(corrections)} correction(s) and "
+            f"{len(additions)} scripture addition(s) -- see the PDF's "
+            "Reviewer Notes section for details."
+        )
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     try:

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 #
-# Runs on boot via systemd (echopulpit-worker.service, see deploy/systemd/) on
-# the custom AMI. One instance = one job: read which video to process from
-# our own instance tag, run the pipeline, upload artifacts to S3, record the
-# result in DynamoDB, then terminate the instance no matter what happens.
+# EC2 user-data on a STOCK Amazon Linux 2023 AMI. One instance = one job:
+# fetch the app code + a job's video metadata, install what's needed,
+# generate the article, upload artifacts, record status, terminate.
+#
+# Deliberately no pre-baked custom AMI: the app is small and Claude-primary
+# (no local GGUF model to bake in), so paying Packer's build/maintenance
+# cost isn't worth it for v1 -- a few seconds of boot-time install is cheap
+# and keeps the AMI itself just "stock AL2023."
 #
 # Deliberately does NOT use `set -e`: we want to reach the S3 upload and
 # DynamoDB status update even if the pipeline itself fails, and we want the
@@ -17,10 +21,13 @@ now() { date -u +%FT%TZ; }
 echo "[$(now)] bootstrap.sh starting"
 
 APP_DIR="/opt/echopulpit"
-# Must match config.yaml's output.dir baked into the AMI.
 OUTPUT_ROOT="/data/output"
-S3_BUCKET="${SERMON_ARTIFACTS_BUCKET:-echopulpit-artifacts}"
+ARTIFACTS_BUCKET="${SERMON_ARTIFACTS_BUCKET:-echopulpit-artifacts}"
+APP_PREFIX="${SERMON_APP_PREFIX:-app}"
+ANTHROPIC_SECRET_ID="${ANTHROPIC_SECRET_ID:-echopulpit/anthropic-api-key}"
 WATCHDOG_HOURS="${SERMON_WATCHDOG_HOURS:-3}"
+
+mkdir -p "$APP_DIR" "$OUTPUT_ROOT"
 
 # ---- IMDSv2 token + metadata helpers ----
 imds_token() {
@@ -49,6 +56,17 @@ else
 fi
 
 terminate_self() {
+  # Best-effort log upload before termination -- console output for a
+  # short-lived instance is often empty (the serial console buffer hasn't
+  # flushed yet by the time it terminates), so this is the only reliable
+  # way to debug a failure after the fact. Uses VIDEO_ID if we got far
+  # enough to read it, otherwise falls back to the instance ID so an
+  # early failure (e.g. missing tags) is still visible.
+  local log_key="sermons/${VIDEO_ID:-unknown-$INSTANCE_ID}/bootstrap.log"
+  for attempt in 1 2 3; do
+    aws s3 cp "$LOG_FILE" "s3://${ARTIFACTS_BUCKET}/${log_key}" >/dev/null 2>&1 && break
+    sleep 2
+  done
   echo "[$(now)] Terminating instance $INSTANCE_ID"
   aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION" >/dev/null 2>&1 || true
   # Backstop in case the API call itself failed (network blip, IAM issue,
@@ -67,7 +85,20 @@ tag() {
     --query 'Tags[0].Value' --output text 2>/dev/null
 }
 
-VIDEO_ID="$(tag SermonVideoId)"
+# This is the first IAM-authenticated call in the script. Instance-profile
+# credentials via IMDS can take a few seconds to become available after
+# boot -- calling before they're ready fails closed (empty VIDEO_ID), which
+# used to abort the whole job. Retry instead of failing on the first miss.
+VIDEO_ID=""
+for attempt in $(seq 1 10); do
+  VIDEO_ID="$(tag SermonVideoId)"
+  if [[ -n "$VIDEO_ID" && "$VIDEO_ID" != "None" ]]; then
+    break
+  fi
+  echo "[$(now)] SermonVideoId tag not readable yet (attempt $attempt/10), retrying..."
+  sleep 3
+done
+
 VIDEO_TITLE="$(tag SermonVideoTitle)"
 VIDEO_DURATION_SECONDS="$(tag SermonVideoDurationSeconds)"
 VIDEO_END_TIME="$(tag SermonVideoEndTime)"
@@ -79,22 +110,87 @@ fi
 
 echo "[$(now)] Processing video_id=$VIDEO_ID title=${VIDEO_TITLE:-<unknown>}"
 
+# ---- Install OS-level deps ----
+# No dnf here on purpose: an earlier throwaway test instance died mid-boot
+# right after a `dnf install` step, consistent with AL2023's automatic
+# update/reboot behavior kicking in during a dnf transaction. ffmpeg is
+# fetched directly as a static build instead, so this never touches the
+# package manager.
+
+echo "[$(now)] Installing ffmpeg (static build)"
+curl -sSL -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+mkdir -p /tmp/ffmpeg-extract
+tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract --strip-components=1
+cp /tmp/ffmpeg-extract/ffmpeg /tmp/ffmpeg-extract/ffprobe /usr/local/bin/
+rm -rf /tmp/ffmpeg.tar.xz /tmp/ffmpeg-extract
+
+echo "[$(now)] Creating Python virtualenv"
+# AL2023's system `aws` CLI is itself a Python 3.9 tool that depends on
+# system site-packages (pinned to distro<1.9.0). Installing our deps
+# globally overwrites that pin (something in requirements-worker.txt pulls
+# in distro>=1.9.0), which silently breaks every subsequent `aws` call in
+# this script (Secrets Manager, S3 log upload, tag re-reads, terminate) --
+# with no error surfaced until something downstream inexplicably fails. A
+# venv keeps our deps fully isolated from the system aws CLI's own
+# environment. Also sidesteps the get-pip.py 3.10+ version requirement
+# entirely -- venv bundles its own pip via ensurepip.
+#
+# Lives OUTSIDE $APP_DIR deliberately: the app-code sync below does
+# `s3 sync --delete` into $APP_DIR, which would wipe out a venv created
+# inside it (learned the hard way -- it silently deleted the venv it had
+# just created, since venv/ isn't part of the S3 app bundle).
+VENV_DIR="/opt/echopulpit-venv"
+python3 -m venv "$VENV_DIR"
+PYTHON="${VENV_DIR}/bin/python3"
+
+# ---- Fetch app code + config + style guide from S3 ----
+echo "[$(now)] Syncing app code from s3://${ARTIFACTS_BUCKET}/${APP_PREFIX}/"
+aws s3 sync "s3://${ARTIFACTS_BUCKET}/${APP_PREFIX}/" "$APP_DIR/" --delete
+
+echo "[$(now)] Installing Python deps into venv"
+"$PYTHON" -m pip install --quiet -r "${APP_DIR}/requirements-worker.txt"
+
+# ---- Fetch the Anthropic API key from Secrets Manager. Never logged. ----
+ANTHROPIC_API_KEY="$(aws secretsmanager get-secret-value \
+  --secret-id "$ANTHROPIC_SECRET_ID" --region "$REGION" \
+  --query SecretString --output text 2>/dev/null)"
+if [[ -z "$ANTHROPIC_API_KEY" || "$ANTHROPIC_API_KEY" == "None" ]]; then
+  echo "[$(now)] ERROR: could not read secret $ANTHROPIC_SECRET_ID -- aborting"
+  exit 1
+fi
+export ANTHROPIC_API_KEY
+
+# ---- Fetch yt-dlp cookies (Netscape format) from Secrets Manager, if the
+# secret exists. Optional, not required: YouTube increasingly blocks
+# requests from cloud/datacenter IPs without them, but a missing secret
+# shouldn't hard-fail every job -- it just degrades back to that failure
+# mode until the secret is populated. Never logged.
+YTDLP_COOKIES_SECRET_ID="${YTDLP_COOKIES_SECRET_ID:-echopulpit/ytdlp-cookies}"
+YTDLP_COOKIES_FILE="${APP_DIR}/cookies.txt"
+if aws secretsmanager get-secret-value --secret-id "$YTDLP_COOKIES_SECRET_ID" --region "$REGION" \
+    --query SecretString --output text >"$YTDLP_COOKIES_FILE" 2>/dev/null \
+    && [[ -s "$YTDLP_COOKIES_FILE" ]]; then
+  echo "[$(now)] Loaded yt-dlp cookies from Secrets Manager"
+  export YTDLP_COOKIES_FILE
+else
+  echo "[$(now)] No yt-dlp cookies secret found ($YTDLP_COOKIES_SECRET_ID) -- proceeding without cookies"
+  rm -f "$YTDLP_COOKIES_FILE"
+fi
+
 JOB_DIR="${OUTPUT_ROOT}/${VIDEO_ID}"
-S3_PREFIX="s3://${S3_BUCKET}/sermons/${VIDEO_ID}/"
+S3_PREFIX="s3://${ARTIFACTS_BUCKET}/sermons/${VIDEO_ID}/"
 
 cd "$APP_DIR"
 export CONFIG_PATH="${APP_DIR}/config.yaml"
 export VIDEO_ID VIDEO_TITLE VIDEO_DURATION_SECONDS VIDEO_END_TIME
 export SERMON_JOBS_TABLE="${SERMON_JOBS_TABLE:-EchoPulpitJobs}"
+# yt-dlp (installed into the venv via requirements-worker.txt) is invoked
+# as a subprocess by sermon_pipeline.py, which looks for it via PATH --
+# calling "$PYTHON" directly doesn't put the venv's bin/ on PATH the way
+# activating it would.
+export PATH="${VENV_DIR}/bin:$PATH"
 
-# This AMI is built on a GPU instance type (g4dn.xlarge / T4) specifically so
-# these get used -- without them, both Whisper and the LLM silently fall
-# back to CPU and the GPU spend buys nothing.
-export WHISPER_DEVICE="${WHISPER_DEVICE:-cuda}"
-export WHISPER_COMPUTE_TYPE="${WHISPER_COMPUTE_TYPE:-float16}"
-export LLM_N_GPU_LAYERS="${LLM_N_GPU_LAYERS:-35}"  # full offload for a 7B Q5 model on a 16GB T4
-
-python3.11 sermon_pipeline.py
+"$PYTHON" sermon_pipeline.py
 PIPELINE_EXIT_CODE=$?
 
 if [[ -d "$JOB_DIR" ]]; then
@@ -114,7 +210,7 @@ fi
 # success (status=COMPLETE) -- we only need to record the S3 location here,
 # and to record failure here since the Python process can't do that for its
 # own crash.
-python3.11 - "$VIDEO_ID" "$PIPELINE_EXIT_CODE" "$UPLOAD_OK" "$S3_PREFIX" <<'PYEOF'
+"$PYTHON" - "$VIDEO_ID" "$PIPELINE_EXIT_CODE" "$UPLOAD_OK" "$S3_PREFIX" <<'PYEOF'
 import sys
 sys.path.insert(0, "/opt/echopulpit")
 from storage import StateStore

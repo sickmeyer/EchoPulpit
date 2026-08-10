@@ -1,0 +1,41 @@
+# Uploaded to S3 (app/config.yaml) and fetched by bootstrap.sh at boot.
+# Differs from the repo-root config.yaml (used for local dev) only in
+# output.dir, which must match bootstrap.sh's OUTPUT_ROOT.
+youtube:
+  channel_id: "UC2G5D6TA-ywpSJCERaAzG_Q"
+  lookback_hours: 48
+
+transcription:
+  whisper_model: "medium"
+  language: "en"
+  vad_filter: true
+  prefer_captions: true
+  min_caption_coverage: 0.85
+  caption_langs: ["en", "en-US", "en-GB"]
+
+sermon_extraction:
+  min_minutes: 12
+  max_fraction_of_total: 0.9
+  window_minutes: 12
+  drop_threshold_segments: 8
+
+llm:
+  claude_model: "claude-sonnet-5"
+  style_guide_path: "prompts/style_guide.md"
+  # No model_path: the worker never installs llama-cpp-python (see
+  # requirements-worker.txt), so this path is intentionally left unset --
+  # ANTHROPIC_API_KEY is always present in production (Secrets Manager), so
+  # build_backend() always takes the Claude path and init_llm() never runs.
+  #
+  # claude-sonnet-5 reasons by default and thinking tokens count against
+  # max_tokens -- confirmed by production logs where a 8000 max_tokens
+  # budget got consumed almost entirely by thinking (7999 tokens), leaving
+  # ~0 for the actual article and producing an empty response. This model
+  # uses thinking.type=adaptive + output_config.effort (not the older
+  # enabled/budget_tokens scheme, which it rejects with a 400). max_tokens
+  # stays generous regardless, as a cheap safety ceiling.
+  max_tokens: 16000
+  thinking_effort: "medium"
+
+output:
+  dir: "/data/output"
