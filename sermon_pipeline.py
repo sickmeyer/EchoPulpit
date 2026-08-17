@@ -170,22 +170,46 @@ def _yt_dlp_client_and_cookie_args() -> List[str]:
 
 def download_audio(video_id: str, out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
-    _clean_audio_leftovers(out_dir)
     out_tpl = os.path.join(out_dir, "audio.%(ext)s")
     url = f"https://www.youtube.com/watch?v={video_id}"
-    cmd = [
-        "yt-dlp",
-        "-f", "bestaudio[protocol!*=m3u8]/bestaudio/best",
-        "--no-playlist",
-        *_yt_dlp_client_and_cookie_args(),
-        "--add-header", "Referer:https://www.youtube.com/",
-        "-o", out_tpl,
-        url
-    ]
-    try:
-        subprocess.check_call(cmd, timeout=YT_DLP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"yt-dlp audio download timed out after {YT_DLP_TIMEOUT_SECONDS}s") from e
+
+    def _attempt(client_args: List[str]) -> bool:
+        _clean_audio_leftovers(out_dir)
+        cmd = [
+            "yt-dlp",
+            "-f", "bestaudio[protocol!*=m3u8]/bestaudio/best",
+            "--no-playlist",
+            *client_args,
+            "--add-header", "Referer:https://www.youtube.com/",
+            "-o", out_tpl,
+            url,
+        ]
+        try:
+            subprocess.check_call(cmd, timeout=YT_DLP_TIMEOUT_SECONDS)
+            return True
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"yt-dlp audio download timed out after {YT_DLP_TIMEOUT_SECONDS}s") from e
+        except subprocess.CalledProcessError:
+            return False
+
+    # The cookie+default-client combo (_yt_dlp_client_and_cookie_args) has
+    # started 403ing on audio-only formats specifically -- YouTube's
+    # SABR-only/server-side-ad-placement rollout (yt-dlp issue #12482)
+    # affects the tv client, which is what yt-dlp falls back to whenever
+    # cookies are present. The android client dodges it but can't carry
+    # cookie auth, so try android first (these are public livestreams --
+    # no age-gate/private-video need for cookies) and only fall back to
+    # cookies if that fails (e.g. android-visible formats unavailable).
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE")
+    have_cookies = bool(cookies_file and os.path.isfile(cookies_file))
+
+    ok = _attempt(["--extractor-args", "youtube:player_client=android"])
+    if not ok and have_cookies:
+        ok = _attempt(["--cookies", cookies_file])
+    if not ok:
+        raise RuntimeError(f"yt-dlp audio download failed for {video_id} (tried android client"
+                            + (" and cookie fallback" if have_cookies else "") + ")")
+
     for fn in os.listdir(out_dir):
         if fn.startswith("audio."):
             return os.path.join(out_dir, fn)

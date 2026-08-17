@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadCostExplorer",
+      "Effect": "Allow",
+      "Action": "ce:GetCostAndUsage",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadJobHistory",
+      "Effect": "Allow",
+      "Action": "dynamodb:Scan",
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}"
+    },
+    {
+      "Sid": "SendEmail",
+      "Effect": "Allow",
+      "Action": "ses:SendEmail",
+      "Resource": "${SES_SENDER_IDENTITY_ARN}"
+    },
+    {
+      "Sid": "OwnLogGroup",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/echopulpit-monthly-report:*"
+    }
+  ]
+}

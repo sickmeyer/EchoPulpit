@@ -10,7 +10,14 @@ transcription:
   language: "en"
   vad_filter: true
   prefer_captions: true
-  min_caption_coverage: 0.85
+  # Lowered from 0.85 (2026-08-17): YouTube's SABR-only rollout is now
+  # blocking yt-dlp's audio download (both the cookie and android-client
+  # paths -- see download_audio() in sermon_pipeline.py) often enough that
+  # jobs with decent-but-not-quite-0.85 caption coverage were failing
+  # outright instead of using the captions they already had. 0.75 trades a
+  # bit of transcript completeness for actually finishing the job when the
+  # Whisper fallback path is unreliable.
+  min_caption_coverage: 0.75
   caption_langs: ["en", "en-US", "en-GB"]
 
 sermon_extraction:
