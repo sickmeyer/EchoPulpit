@@ -14,12 +14,18 @@
       "Resource": "arn:aws:s3:::${ARTIFACTS_BUCKET}/app/*"
     },
     {
+      "Sid": "FetchDeps",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::${ARTIFACTS_BUCKET}/deps/*"
+    },
+    {
       "Sid": "ListKnownPrefixes",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::${ARTIFACTS_BUCKET}",
       "Condition": {
-        "StringLike": { "s3:prefix": ["app/*", "sermons/*"] }
+        "StringLike": { "s3:prefix": ["app/*", "sermons/*", "deps/*"] }
       }
     },
     {

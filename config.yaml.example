@@ -10,7 +10,7 @@ transcription:
   language: "en"
   vad_filter: true
   prefer_captions: true       # try YouTube captions before falling back to Whisper
-  min_caption_coverage: 0.85  # fall back to Whisper if captions cover less than this fraction of the video
+  min_caption_coverage: 0.75  # fall back to Whisper if captions cover less than this fraction of the video
   caption_langs: ["en", "en-US", "en-GB"]
 
 sermon_extraction:

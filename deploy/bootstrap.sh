@@ -118,11 +118,82 @@ echo "[$(now)] Processing video_id=$VIDEO_ID title=${VIDEO_TITLE:-<unknown>}"
 # package manager.
 
 echo "[$(now)] Installing ffmpeg (static build)"
-curl -sSL -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-mkdir -p /tmp/ffmpeg-extract
-tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract --strip-components=1
-cp /tmp/ffmpeg-extract/ffmpeg /tmp/ffmpeg-extract/ffprobe /usr/local/bin/
-rm -rf /tmp/ffmpeg.tar.xz /tmp/ffmpeg-extract
+FFMPEG_OK=0
+FFMPEG_TARBALL=/tmp/ffmpeg.tar.xz
+
+# Worker instance type varies by architecture (Graviton/arm64 vs Intel/x86_64
+# -- see WORKER_INSTANCE_TYPE on the Poller Lambda), so bootstrap.sh has to
+# fetch the matching ffmpeg build rather than assuming amd64.
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64)
+    FFMPEG_MIRROR_KEY="deps/ffmpeg-static-linux-amd64.tar.xz"
+    FFMPEG_UPSTREAM_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    ;;
+  aarch64)
+    FFMPEG_MIRROR_KEY="deps/ffmpeg-static-linux-arm64.tar.xz"
+    FFMPEG_UPSTREAM_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
+    ;;
+  *)
+    echo "[$(now)] ERROR: unrecognized architecture '$ARCH' -- no ffmpeg build mapping"
+    FFMPEG_MIRROR_KEY=""
+    FFMPEG_UPSTREAM_URL=""
+    ;;
+esac
+
+fetch_ffmpeg() {
+  # Our own S3-hosted mirror first -- fast, IAM-authenticated, and doesn't
+  # depend on a third party's uptime for something this basic. Falls back
+  # to the upstream static-build site only if our mirror is somehow
+  # missing. Observed 2026-08-17: johnvansickle.com went fully unreachable
+  # (TLS handshake failures, then connection timeouts) for an extended
+  # period, independent of anything on our end, and took out every job in
+  # flight -- exactly the single-point-of-failure this mirror removes.
+  # Explicit timeouts on the fallback curl so a dead host fails in seconds,
+  # not the ~5 minutes of OS-default timeout that let 3 retries burn ~15
+  # minutes per instance during that outage.
+  [[ -z "$FFMPEG_MIRROR_KEY" ]] && return 1
+  if aws s3 cp "s3://${ARTIFACTS_BUCKET}/${FFMPEG_MIRROR_KEY}" "$FFMPEG_TARBALL" --region "$REGION" >/dev/null 2>&1; then
+    return 0
+  fi
+  curl -sSL --connect-timeout 10 --max-time 120 -o "$FFMPEG_TARBALL" "$FFMPEG_UPSTREAM_URL"
+}
+
+for attempt in 1 2 3; do
+  if fetch_ffmpeg \
+      && mkdir -p /tmp/ffmpeg-extract \
+      && tar -xJf "$FFMPEG_TARBALL" -C /tmp/ffmpeg-extract --strip-components=1 \
+      && cp /tmp/ffmpeg-extract/ffmpeg /tmp/ffmpeg-extract/ffprobe /usr/local/bin/ \
+      && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe; then
+    FFMPEG_OK=1
+    rm -rf "$FFMPEG_TARBALL" /tmp/ffmpeg-extract
+    break
+  fi
+  echo "[$(now)] ffmpeg install attempt $attempt/3 failed, retrying in 5s..."
+  rm -rf "$FFMPEG_TARBALL" /tmp/ffmpeg-extract
+  sleep 5
+done
+
+if [[ "$FFMPEG_OK" != "1" ]]; then
+  # Fail fast here instead of limping through venv creation, S3 app sync,
+  # pip install, and a Secrets Manager call on a job that's already doomed
+  # -- ensure_tools() in sermon_pipeline.py would just crash on this same
+  # missing binary a bit later anyway, with a less specific error and a
+  # wasted ~40s of billed instance time. Uses the AWS CLI directly (venv +
+  # storage.py aren't synced yet at this point) to record the failure the
+  # same way StateStore.mark_failed() would, so the poller's retry/reclaim
+  # logic and the Notifier Lambda's failure email both still see it.
+  echo "[$(now)] ERROR: ffmpeg install failed after 3 attempts -- aborting"
+  aws dynamodb update-item \
+    --region "$REGION" \
+    --table-name "${SERMON_JOBS_TABLE:-EchoPulpitJobs}" \
+    --key "{\"video_id\": {\"S\": \"$VIDEO_ID\"}}" \
+    --update-expression "SET #status = :failed, #error = :err, completed_at = :ts ADD failure_count :one" \
+    --expression-attribute-names '{"#status":"status","#error":"error"}' \
+    --expression-attribute-values "{\":failed\":{\"S\":\"FAILED\"},\":err\":{\"S\":\"bootstrap.sh: ffmpeg install failed after 3 attempts\"},\":ts\":{\"S\":\"$(now)\"},\":one\":{\"N\":\"1\"}}" \
+    >/dev/null 2>&1 || echo "[$(now)] WARNING: failed to record ffmpeg failure in DynamoDB"
+  exit 1
+fi
 
 echo "[$(now)] Creating Python virtualenv"
 # AL2023's system `aws` CLI is itself a Python 3.9 tool that depends on
