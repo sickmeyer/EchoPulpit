@@ -6,6 +6,11 @@ sermons: a scheduled check detects a newly-ended livestream, a stock EC2
 instance (a temporary cloud server -- "EC2" is Amazon's virtual-machine
 service) does the work, emails you the result, and terminates itself.
 
+If your church streams through **Subsplash** (which restreams to YouTube),
+EchoPulpit can optionally pull the sermon audio from your Subsplash podcast
+feed instead of from YouTube -- see "Audio source: Subsplash podcast feed"
+below. YouTube-only works too; Subsplash is an extra, not a requirement.
+
 This README is written so a developer or IT technician who isn't already an
 AWS expert can get this running from scratch. AWS-specific terms are
 explained in plain language the first time they come up.
@@ -235,6 +240,7 @@ never on disk in this repo.
 | `CHANNEL_ID` | The channel's YouTube **channel ID**, not its `@handle` | Poller Lambda | On the channel's YouTube page: Share → Copy channel ID (starts with `UC...`) |
 | `ANTHROPIC_API_KEY` | Claude API key for article generation | Worker (fetched from Secrets Manager at boot) | [console.anthropic.com](https://console.anthropic.com/). v1 is Claude-primary with no local-model fallback baked into the worker -- see "Local-model fallback" below if you want one |
 | yt-dlp cookies (optional but recommended) | Netscape-format cookies from a real logged-in YouTube session | Worker, if the secret exists | YouTube increasingly blocks requests from cloud/datacenter IPs as bot traffic. Export via a browser extension ("Get cookies.txt LOCALLY") rather than `yt-dlp --cookies-from-browser`, which can fail against Chrome's newer cookie encryption on Windows. Store with `aws secretsmanager create-secret --name echopulpit/ytdlp-cookies --secret-string file://cookies.txt --tags Key=Project,Value=echopulpit`. Missing is fine -- the worker just degrades back to whatever success rate captions/no-cookie downloads get |
+| Subsplash podcast feed URL (optional, recommended if you stream via Subsplash) | Public RSS feed of your service recordings, e.g. `https://podcasts.subsplash.com/<id>/podcast.rss` | Worker (`transcription.subsplash_feed_url` in `deploy/config.worker.yaml`) | Subsplash dashboard → create a Podcast whose content source is the media series/list your service recordings land in, then copy its RSS URL. Not a secret -- it's a public feed. See "Audio source: Subsplash podcast feed" below |
 | AWS account + admin/root access (one-time) | To create the deployer IAM user | You, once | Your own AWS account |
 | `SES_SENDER_ADDRESS` | Email address the article gets sent **from** | Notifier Lambda | Any address you control -- must be verified in SES (`aws ses verify-email-identity`) |
 | `NOTIFY_RECIPIENT_ADDRESS` | Email address the article gets sent **to** | Notifier Lambda | Your inbox. Must *also* be verified if your SES account is still in the sandbox (new AWS accounts default to sandbox mode, which only allows sending to verified addresses) |
@@ -244,6 +250,8 @@ never on disk in this repo.
 
 Optional tuning (not secrets, live in `config.yaml`): `transcription.whisper_model`,
 `transcription.prefer_captions`/`min_caption_coverage`/`caption_langs`,
+`transcription.subsplash_feed_url`/`subsplash_wait_minutes` (optional
+Subsplash audio source),
 `sermon_extraction.*` (how much of the stream is "the sermon" vs.
 announcements/worship), `llm.*` (`max_tokens`, `thinking_effort`, style
 guide path, local-model path). See `config.yaml.example` for the full set
@@ -291,7 +299,8 @@ EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         │   4. fetch ANTHROPIC_API_KEY (required) and yt-dlp cookies
         │      (optional, see below) from Secrets Manager
         │   5. run sermon_pipeline.py for that one video (captions-first,
-        │      falls back to Whisper; Claude writes the article)
+        │      falls back to Whisper on audio from the Subsplash feed if
+        │      configured, else YouTube; Claude writes the article)
         │   6. upload artifacts + this boot log to S3
         │   7. record COMPLETE/FAILED in DynamoDB
         │   8. terminate self (+ boot-time watchdog force-terminates at
@@ -435,6 +444,46 @@ hours to become available after the stream ends, so same-day processing
 will usually still fall back to Whisper -- captions mainly pay off if a
 video is reprocessed later (`FORCE_REPROCESS=true` with `VIDEO_ID` set).
 
+### Audio source: Subsplash podcast feed (optional)
+
+YouTube blocks audio downloads from cloud servers ("Sign in to confirm
+you're not a bot") often enough that yt-dlp from EC2 is unreliable, even
+with cookies -- YouTube rotates them and every job fails until someone
+exports fresh ones. If your church streams through Subsplash, there's a
+better source: Subsplash archives each service to your media library, and a
+Subsplash podcast built from that library is a public RSS feed with a direct
+MP3 link per service. No bot checks, no cookies.
+
+To turn it on, create the podcast in the Subsplash dashboard (content source:
+the media series or list your service recordings go into), then set in
+`deploy/config.worker.yaml`:
+
+```yaml
+transcription:
+  subsplash_feed_url: "https://podcasts.subsplash.com/<id>/podcast.rss"
+  subsplash_wait_minutes: 45
+```
+
+and sync it to `s3://<bucket>/app/config.yaml`. What changes, and what
+doesn't:
+
+- **YouTube still drives everything else.** The poller still detects ended
+  livestreams through the YouTube Data API, and captions are still tried
+  first. Subsplash only replaces *where the audio comes from* when Whisper
+  is needed.
+- **Matching.** The worker picks the feed episode with the same title as
+  the YouTube video (case/whitespace-insensitive), dated the stream's end
+  date or the day before (Subsplash dates episodes by calendar day, so an
+  evening service ending after midnight UTC is dated the previous day). If
+  several match, the closest duration wins. Episode order in the feed
+  doesn't matter.
+- **Waiting for publication.** If the episode isn't in the feed yet, the
+  worker re-checks every 5 minutes for up to `subsplash_wait_minutes`.
+- **Fallback.** No matching episode (not every stream gets one) → yt-dlp
+  from YouTube, exactly as without Subsplash.
+
+Leave `subsplash_feed_url` unset for YouTube-only behavior.
+
 ### Article generation: pastoral voice + verified scripture
 
 The model returns a single document: `---`-delimited YAML frontmatter (SEO
@@ -493,6 +542,30 @@ distinct from `article_raw.md`), `article.html`, `sermon-article.pdf`.
 Notifier Lambda attaches both `sermon-article.pdf` and `article.md` to the
 completion email.
 
+### Notification emails
+
+Every email EchoPulpit sends uses one subject format, so a single mail
+filter on `[EchoPulpit]` catches all of them, and the word after it lets
+you filter by kind:
+
+```
+[EchoPulpit] Article ready: Sunday Main Worship — Sep 20, 2026
+[EchoPulpit] Review needed: Midweek Worship Service — Sep 17, 2026
+[EchoPulpit] Failed (attempt 2): Weekly Bible Hour — Sep 13, 2026
+[EchoPulpit] Monthly report: August 2026
+```
+
+- **Article ready** / **Review needed** -- the finished article, with the
+  PDF and Markdown attached. "Review needed" means the article has flags in
+  its Reviewer Notes to look at before publishing.
+- **Failed (attempt N)** -- sent on each failed attempt; a job gets 3
+  attempts before it's left `FAILED` (see Troubleshooting).
+- The date is the service's local date (from the stream's end time), which
+  also keeps weekly repeats of the same service title from being grouped
+  into one conversation by mail clients. It's shown in `America/Chicago` by
+  default; set `NOTIFY_TIMEZONE` (any IANA zone, e.g. `America/New_York`)
+  before running `setup.sh` to change it.
+
 ---
 
 ## Troubleshooting
@@ -506,6 +579,18 @@ missing or misconfigured, before you go digging through the console.
   there. The DynamoDB item for that `video_id` also has an `error` field
   with the last failure reason and a `failure_count` (jobs auto-retry up to
   3 times before being left `FAILED` for manual review).
+- **Every job fails with "Sign in to confirm you're not a bot".**
+  YouTube is blocking audio downloads from AWS. Best fix: if your church
+  streams via Subsplash, set `subsplash_feed_url` (see "Audio source:
+  Subsplash podcast feed"). Otherwise, export fresh yt-dlp cookies -- the
+  old ones were likely rotated by YouTube.
+- **Re-running jobs that already used up their retries.** Once the cause is
+  fixed, `./deploy/requeue-failed.sh` lists `FAILED` jobs (dry run);
+  `--apply` resets them so the poller relaunches them on its next run, and
+  `--cookies cookies.txt` stores fresh cookies first. Pass specific video
+  IDs to requeue only those, and `--force` if you fixed something other
+  than cookies (it otherwise refuses when the cookies haven't changed since
+  the last failure).
 - **No email arrived for a completed job.** Check SES is out of sandbox
   mode, or that both sender and recipient addresses are verified (Step 3
   above) -- sandboxed SES silently refuses to send to unverified addresses.

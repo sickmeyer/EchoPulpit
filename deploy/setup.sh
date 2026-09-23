@@ -253,7 +253,9 @@ aws lambda add-permission --function-name "$POLLER_FN_NAME" --region "$REGION" \
 # ==========================================================================
 (cd "$LAMBDA_DIR" && zip -qj "${BUILD_DIR}/notifier-lambda.zip" notifier_lambda.py)
 
-NOTIFIER_ENV="Variables={SES_SENDER_ADDRESS=${SES_SENDER_ADDRESS},NOTIFY_RECIPIENT_ADDRESS=${NOTIFY_RECIPIENT_ADDRESS},SERMON_ARTIFACTS_BUCKET=${ARTIFACTS_BUCKET}}"
+# Timezone for the service date in notification subject lines (see README).
+NOTIFY_TIMEZONE="${NOTIFY_TIMEZONE:-America/Chicago}"
+NOTIFIER_ENV="Variables={SES_SENDER_ADDRESS=${SES_SENDER_ADDRESS},NOTIFY_RECIPIENT_ADDRESS=${NOTIFY_RECIPIENT_ADDRESS},SERMON_ARTIFACTS_BUCKET=${ARTIFACTS_BUCKET},NOTIFY_TIMEZONE=${NOTIFY_TIMEZONE}}"
 
 if aws lambda get-function --function-name "$NOTIFIER_FN_NAME" --region "$REGION" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$NOTIFIER_FN_NAME" --region "$REGION" \
