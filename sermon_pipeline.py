@@ -235,12 +235,23 @@ SUBSPLASH_POLL_INTERVAL_SECONDS = int(os.environ.get("SUBSPLASH_POLL_INTERVAL_SE
 _ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
 
+# Jobs queued straight from the feed (older sermons with no YouTube
+# livestream -- see scripts/queue_feed_episodes.py) use this video_id
+# prefix; get_transcript() skips YouTube entirely for them.
+SUBSPLASH_JOB_ID_PREFIX = "subsplash-"
+
+
+def is_subsplash_job(video_id: str) -> bool:
+    return (video_id or "").startswith(SUBSPLASH_JOB_ID_PREFIX)
+
+
 class FeedEpisode:
-    def __init__(self, title: str, pub_date, duration_seconds: float, audio_url: str):
+    def __init__(self, title: str, pub_date, duration_seconds: float, audio_url: str, guid: str = ""):
         self.title = title
         self.pub_date = pub_date  # datetime.date
         self.duration_seconds = duration_seconds
         self.audio_url = audio_url
+        self.guid = guid
 
     def __repr__(self):
         return f"FeedEpisode({self.title!r}, {self.pub_date}, {self.duration_seconds:.0f}s)"
@@ -270,7 +281,10 @@ def parse_podcast_feed(xml_bytes: bytes) -> List[FeedEpisode]:
             duration = parse_timestamp_to_seconds(raw_duration)
         except ValueError:
             duration = 0.0
-        episodes.append(FeedEpisode((item.findtext("title") or "").strip(), pub_date, duration, enclosure.get("url")))
+        episodes.append(FeedEpisode(
+            (item.findtext("title") or "").strip(), pub_date, duration, enclosure.get("url"),
+            guid=(item.findtext("guid") or "").strip(),
+        ))
     return episodes
 
 
@@ -493,7 +507,8 @@ def get_transcript(
     Returns (segments, source) where source is "captions" or "whisper".
     """
     force_whisper = os.environ.get("FORCE_WHISPER", "").lower() in ("1", "true", "yes")
-    prefer_captions = bool(cfg.get("prefer_captions", True)) and not force_whisper
+    subsplash_only = is_subsplash_job(video_id)
+    prefer_captions = bool(cfg.get("prefer_captions", True)) and not force_whisper and not subsplash_only
 
     if prefer_captions:
         langs = cfg.get("caption_langs", ["en", "en-US", "en-GB"])
@@ -524,6 +539,9 @@ def get_transcript(
                 wait_minutes=float(cfg.get("subsplash_wait_minutes", 0)),
             )
         if not audio_path:
+            if subsplash_only:
+                raise RuntimeError(f"No Subsplash feed episode matched {title!r} ({end_time}) "
+                                   "and this job has no YouTube video to fall back to")
             audio_path = download_audio(video_id, media_dir)
         ffmpeg_to_wav(audio_path, wav_path)
 

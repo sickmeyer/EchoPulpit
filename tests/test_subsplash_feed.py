@@ -82,3 +82,28 @@ def test_closest_duration_breaks_ties():
 def test_no_end_time_means_no_match():
     episodes = [_ep("Weekly Bible Hour", date(2026, 9, 13), 1985)]
     assert match_feed_episode(episodes, "Weekly Bible Hour", "", 1985) is None
+
+
+def test_parse_podcast_feed_reads_guid():
+    feed = FEED.replace(
+        b"<title>Weekly Bible Hour</title>",
+        b"<title>Weekly Bible Hour</title><guid isPermaLink=\"false\">3efe714928c087830c59ae6c87dacefb</guid>",
+    )
+    episodes = parse_podcast_feed(feed)
+    assert episodes[1].guid == "3efe714928c087830c59ae6c87dacefb"
+    assert episodes[0].guid == ""
+
+
+def test_feed_job_end_time_matches_its_own_episode():
+    # queue_feed_episodes.py sets end_time to "<pub_date>T12:00:00Z"
+    episodes = [
+        _ep("Self-serving Bias", date(2023, 6, 4), 3268),
+        _ep("Heaven's Reward Fallacy", date(2023, 5, 28), 2863),
+    ]
+    assert match_feed_episode(episodes, "Self-serving Bias", "2023-06-04T12:00:00Z", 3268) is episodes[0]
+
+
+def test_subsplash_job_ids():
+    from sermon_pipeline import is_subsplash_job
+    assert is_subsplash_job("subsplash-f256cbe023cf21abb5a3884621cb2b53")
+    assert not is_subsplash_job("J8uEgK3bFA0")

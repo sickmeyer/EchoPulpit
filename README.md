@@ -484,6 +484,14 @@ doesn't:
 
 Leave `subsplash_feed_url` unset for YouTube-only behavior.
 
+**Backfilling older sermons from the feed.** Sermons that were never
+livestreamed to YouTube (or predate EchoPulpit) can be queued straight
+from the feed: `python scripts/queue_feed_episodes.py --top 10` lists the
+first 10 episodes in feed order (dry run); add `--apply` to queue them.
+These jobs are keyed `subsplash-<episode guid>` (re-running never
+double-queues), and the worker takes their audio from the feed only -- no
+YouTube captions or yt-dlp.
+
 ### Article generation: pastoral voice + verified scripture
 
 The model returns a single document: `---`-delimited YAML frontmatter (SEO
