@@ -1,3 +1,7 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EchoPulpit</title>
 <meta name="description" content="Turns a church's YouTube livestream into a finished, SEO-ready article -- transcribed, written, and scripture-checked automatically, with nothing running between sermons.">
 <style>
@@ -313,13 +317,13 @@
 
   .feature-list { display: flex; flex-direction: column; gap: 22px; }
   .feature-list li { list-style: none; display: flex; gap: 14px; }
-  .feature-list ul { padding: 0; margin: 0; display: flex; flex-direction: column; gap: 22px; }
+  .feature-list ul, ul.feature-list { padding: 0; margin: 0; display: flex; flex-direction: column; gap: 22px; }
   .feature-icon {
     width: 32px; height: 32px; border-radius: 9px; flex: none;
     background: var(--ink-soft); display: flex; align-items: center; justify-content: center;
   }
   .feature-icon svg { width: 16px; height: 16px; stroke: var(--ink); }
-  .feature-text h4 { font-size: 15.5px; font-weight: 700; margin-bottom: 4px; font-family: var(--sans); }
+  .feature-text h4 { font-size: 15.5px; font-weight: 700; margin: 5px 0 4px; font-family: var(--sans); }
   .feature-text p { font-size: 13.5px; color: var(--text-muted); line-height: 1.55; }
 
   /* ---- Closing CTA ---- */
@@ -343,6 +347,42 @@
   }
   footer a { text-decoration: none; color: var(--text-dim); font-weight: 600; }
   footer a:hover { color: var(--signal); }
+
+  /* ---- Phones ---- */
+  @media (max-width: 640px) {
+    .wrap { padding: 0 16px; }
+    nav.top .wrap { height: 56px; }
+    .nav-links a:not(.cta) { display: none; }
+    .nav-links a.cta { padding: 7px 12px; font-size: 13.5px; }
+    .hero { padding: 52px 0 44px; }
+    /* The waveform runs behind the headline; on a narrow screen it covers
+       more of the text, so fade it to keep the heading readable. */
+    .hero-wave { height: 300px; opacity: 0.45; }
+    .eyebrow { font-size: 11.5px; margin-bottom: 20px; }
+    .hero h1 { font-size: clamp(34px, 10vw, 44px); }
+    .hero-sub { font-size: 17px; margin-top: 18px; }
+    .hero-actions { margin-top: 28px; }
+    .hero-actions .btn { flex: 1 1 100%; justify-content: center; }
+    .hero-meta { margin-top: 36px; gap: 10px 22px; }
+    section { padding: 56px 0; }
+    .section-lede { font-size: 16px; }
+    .pipeline, .stat-band, .output-grid { margin-top: 36px; }
+    .output-grid { gap: 36px; }
+    .article-card { padding: 26px 20px 22px; }
+    .article-card h4 { font-size: 21px; }
+    .stat { padding: 22px 20px; }
+    .stat-value { font-size: 30px; }
+    .closing { padding: 64px 0 56px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; }
+  }
+  /* Narrow phones: the six pipeline steps become a single column list,
+     icon beside its text. */
+  @media (max-width: 420px) {
+    .pipeline { grid-template-columns: 1fr; row-gap: 22px; }
+    .step { display: grid; grid-template-columns: 54px 1fr; column-gap: 16px; padding-right: 0; }
+    .step-num { margin-bottom: 0; grid-row: span 2; }
+    .step h3 { align-self: end; }
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .eyebrow .dot { animation: none; }
