@@ -1,7 +1,8 @@
 """
 Notifier Lambda -- triggered by a DynamoDB Streams subscription on the
 EchoPulpitJobs table. Sends an email via SES when a job finishes: COMPLETE
-(finished article, PDF attached) or FAILED (short alert).
+(finished article; PDF, Markdown and sermon transcript attached) or
+FAILED (short alert).
 
 Two separate DynamoDB updates land a completed job: sermon_pipeline.py's
 mark_processed() sets status=COMPLETE first, and bootstrap.sh's later
@@ -84,6 +85,7 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
     article_key = f"{prefix}article.json"
     pdf_key = f"{prefix}sermon-article.pdf"
     md_key = f"{prefix}article.md"
+    sermon_txt_key = f"{prefix}sermon.txt"
 
     meta_description = ""
     needs_review = True
@@ -143,6 +145,18 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
         msg.attach(md_attachment)
     except Exception as e:
         print(f"Could not attach article.md for {video_id}: {e}")
+
+    # The sermon portion of the transcript the article was written from, so
+    # the reviewer can check the article against what was actually preached.
+    try:
+        sermon_obj = _s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=sermon_txt_key)
+        sermon_attachment = MIMEText(sermon_obj["Body"].read().decode("utf-8"), "plain", "utf-8")
+        sermon_attachment.add_header(
+            "Content-Disposition", "attachment", filename="sermon-transcript.txt"
+        )
+        msg.attach(sermon_attachment)
+    except Exception as e:
+        print(f"Could not attach sermon transcript for {video_id}: {e}")
 
     _ses.send_raw_email(
         Source=SENDER, Destinations=[RECIPIENT], RawMessage={"Data": msg.as_string()}

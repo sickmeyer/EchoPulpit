@@ -539,8 +539,9 @@ output, pre-verification, kept for debugging), `article.md` (the finished,
 publishable frontmatter + body reassembled into one clean document --
 distinct from `article_raw.md`), `article.html`, `sermon-article.pdf`.
 `bootstrap.sh` uploads all of this except `media/` (raw audio) to S3. The
-Notifier Lambda attaches both `sermon-article.pdf` and `article.md` to the
-completion email.
+Notifier Lambda attaches `sermon-article.pdf`, `article.md`, and the
+sermon portion of the transcript (`sermon.txt`, sent as
+`sermon-transcript.txt`) to the completion email.
 
 ### Notification emails
 
@@ -556,8 +557,10 @@ you filter by kind:
 ```
 
 - **Article ready** / **Review needed** -- the finished article, with the
-  PDF and Markdown attached. "Review needed" means the article has flags in
-  its Reviewer Notes to look at before publishing.
+  PDF, Markdown, and sermon transcript attached (the transcript lets you
+  check the article against what was actually preached). "Review needed"
+  means the article has flags in its Reviewer Notes to look at before
+  publishing.
 - **Failed (attempt N)** -- sent on each failed attempt; a job gets 3
   attempts before it's left `FAILED` (see Troubleshooting).
 - The date is the service's local date (from the stream's end time), which
