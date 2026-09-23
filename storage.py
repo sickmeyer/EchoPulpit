@@ -125,6 +125,7 @@ class StateStore:
         title: str,
         actual_end_time: str = "",
         video_duration_seconds: float = 0.0,
+        language: str = "en",
     ) -> bool:
         """
         Atomically claim a video that hasn't been seen before.
@@ -140,6 +141,7 @@ class StateStore:
                     "video_duration_seconds": _to_decimal(video_duration_seconds),
                     "claimed_at": utc_now_iso(),
                     "failure_count": 0,
+                    "language": language,
                 },
                 ConditionExpression="attribute_not_exists(video_id)",
             )

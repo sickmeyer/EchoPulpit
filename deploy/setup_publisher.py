@@ -182,6 +182,8 @@ def update_notifier(publish_url: str):
     lam.update_function_code(FunctionName=NOTIFIER_FN, ZipFile=notifier_zip())
     wait(NOTIFIER_FN)
     env.update(PUBLISH_URL=publish_url, PUBLISH_KEY_SECRET=KEY_SECRET)
+    # Per-language extra reviewers, e.g. NOTIFY_EXTRA_RECIPIENTS_ES=a@x.com,b@y.com
+    env.update({k: v for k, v in os.environ.items() if k.startswith("NOTIFY_EXTRA_RECIPIENTS_")})
     lam.update_function_configuration(FunctionName=NOTIFIER_FN, Environment={"Variables": env})
     wait(NOTIFIER_FN)
     print(f"lambda {NOTIFIER_FN}: updated (publish links -> {publish_url})")

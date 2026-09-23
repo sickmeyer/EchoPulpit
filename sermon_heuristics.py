@@ -14,6 +14,20 @@ NON_SERMON_CUES = {
     "choir", "lyrics", "chorus", "bridge", "verse one", "verse two", "please stand", "you may be seated"
 }
 
+# Spanish services (Whisper language="es"). Multi-word phrases where a
+# single word would also match inside unrelated words. English transcripts
+# don't contain these, so English scoring is unchanged.
+SERMON_CUES |= {
+    "sermón", "mensaje", "escritura", "abran sus biblias", "abran su biblia", "el libro de",
+    "capítulo", "capitulo", "versículo", "versiculo", "esta mañana", "esta noche", "punto número",
+    "primero", "segundo", "tercero", "oremos", "amén", "en el nombre de jesús", "evangelio",
+    "arrepent", "la gracia", "la fe ", "el señor", "cristo", "la palabra de dios", "dice la biblia",
+}
+NON_SERMON_CUES |= {
+    "bienvenidos", "anuncios", "ofrenda", "diezmo", "alabanza", "cantemos", "himno", "coro",
+    "pónganse de pie", "pueden sentarse", "tomen asiento",
+}
+
 @dataclass
 class Segment:
     start: float

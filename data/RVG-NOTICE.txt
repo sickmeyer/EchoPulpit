@@ -1,0 +1,13 @@
+Santa Biblia Reina Valera Gómez (RVG)
+Copyright © 2004, 2010, 2023 Dr. Humberto Gómez Caballero
+Iglesia Bautista Libertad de Matamoros, Tamaulipas, México
+Liberty Baptist Church of Matamoros, P.O. Box 1286, Olmito, TX 78575, USA
+
+data/rvg.json is the unaltered verse text from eBible.org's edition
+(https://ebible.org/sparvg/), converted to JSON; the square brackets that
+mark translator-supplied words were removed, the words kept.
+
+From the copyright holder: reproducing it for profit is prohibited; any
+church or organization that wishes to reproduce it for free distribution
+is free to do so. It is used here only to check the wording of Scripture
+quoted in free church articles.

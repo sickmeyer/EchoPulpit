@@ -40,6 +40,21 @@ church:
   # this timezone (an evening service ends after midnight UTC).
   timezone: "America/Chicago"
 
+# Per-language settings for services not preached in English. A job's
+# language comes from the poller/queue script (VIDEO_LANGUAGE on the worker)
+# or, failing that, from its title ("Servicio en Español" -> es). Spanish
+# articles are written in Spanish, quote the Reina Valera Gómez (data/rvg.json),
+# and keep reviewer notes in English.
+languages:
+  es:
+    whisper_language: "es"
+    caption_langs: ["es", "es-419", "es-MX", "es-US"]
+    default_preacher: "Nelson Bonilla"
+    # Spanish voice guide (same structure as the English one, adapted for a
+    # Spanish-speaking pastor). The main style_guide_path -- the English
+    # preacher's voice -- is never used for Spanish articles.
+    style_guide_path: "prompts/style_guide_es.md"
+
 llm:
   # Switched from claude-sonnet-5 on 2026-09-23 after a blind side-by-side
   # on three sermons. ~4x the cost per article (~$0.35-0.70 vs ~$0.14).

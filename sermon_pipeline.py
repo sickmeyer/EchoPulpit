@@ -17,9 +17,9 @@ from faster_whisper import WhisperModel
 
 from storage import StateStore
 from sermon_heuristics import Segment, extract_sermon
-from prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from prompts import LANGUAGE_INSTRUCTIONS, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from render_pdf import render_pdf
-from scripture_lookup import kjv_available, verify_and_correct_scripture
+from scripture_lookup import BIBLES, bible_available, verify_and_correct_scripture
 
 
 # ---- Prompt helpers ----
@@ -347,7 +347,7 @@ def find_feed_episode(feed_url: str, video_id: str, title: str, end_time_iso: st
 
 
 def build_service_info(cfg: Dict[str, Any], video_id: str, title: str, end_time_iso: str,
-                       video_duration_seconds: float) -> Dict[str, Any]:
+                       video_duration_seconds: float, language: str = "en") -> Dict[str, Any]:
     """Facts about the service EchoPulpit already knows -- service name,
     local date, and (from the Subsplash feed) the preacher -- passed to
     article generation so the model neither guesses nor flags them."""
@@ -368,6 +368,10 @@ def build_service_info(cfg: Dict[str, Any], video_id: str, title: str, end_time_
                 info["preacher"] = episode.author
             if is_subsplash_job(video_id):
                 info["date"] = episode.pub_date.isoformat()
+    if not info.get("preacher"):
+        default = language_settings(cfg, language).get("default_preacher")
+        if default:
+            info["preacher"] = default
     return info
 
 
@@ -936,6 +940,32 @@ def compute_needs_review(flags: List[str]) -> bool:
     return any(flag_category(f) in REVIEW_FLAG_CATEGORIES for f in flags)
 
 
+# ---- Article language ----
+# Jobs carry a language ("en" default, "es" for the Spanish service), set by
+# the poller or queue script and passed to the worker as VIDEO_LANGUAGE.
+SPANISH_TITLE_MARKERS = ("español", "espanol", "spanish", "servicio en")
+
+
+def detect_language(title: str) -> str:
+    t = (title or "").lower()
+    return "es" if any(m in t for m in SPANISH_TITLE_MARKERS) else "en"
+
+
+def language_settings(cfg: Dict[str, Any], language: str) -> Dict[str, Any]:
+    """Per-language overrides from the config's `languages:` block (empty for English)."""
+    return ((cfg.get("languages") or {}).get(language) or {}) if language != "en" else {}
+
+
+def transcription_cfg_for(cfg: Dict[str, Any], language: str) -> Dict[str, Any]:
+    t = dict(cfg.get("transcription") or {})
+    lang = language_settings(cfg, language)
+    if lang.get("whisper_language"):
+        t["language"] = lang["whisper_language"]
+    if lang.get("caption_langs"):
+        t["caption_langs"] = lang["caption_langs"]
+    return t
+
+
 def build_service_details(service: Optional[Dict[str, Any]]) -> str:
     """The 'Service details' block for the user prompt: facts EchoPulpit
     already knows, so the model doesn't guess them or flag them missing."""
@@ -1029,7 +1059,7 @@ MIN_RAW_OUTPUT_CHARS = int(os.environ.get("MIN_RAW_OUTPUT_CHARS", "500"))
 
 def llm_generate_article(
     backend, sermon_text: str, cfg: Dict[str, Any], job_dir: str, style_guide: str = "",
-    service: Optional[Dict[str, Any]] = None,
+    service: Optional[Dict[str, Any]] = None, language: str = "en",
 ) -> Dict[str, Any]:
     """
     Frontmatter-first, context-safe generation:
@@ -1052,12 +1082,13 @@ def llm_generate_article(
     def _fill_template(template: str, text: str) -> str:
         # Avoid Python .format() entirely to prevent brace/key errors.
         return (template.replace("{sermon_text}", text).replace("{style_guide}", style_guide)
-                .replace("{service_details}", build_service_details(service)))
+                .replace("{service_details}", build_service_details(service))
+                .replace("{language_instructions}", LANGUAGE_INSTRUCTIONS.get(language, "")))
 
     def _finalize(frontmatter: Dict[str, Any], body: str) -> Dict[str, Any]:
         frontmatter = normalize_article_frontmatter(frontmatter)
-        if kjv_available():
-            corrected_body, surviving_refs, flags = verify_and_correct_scripture(body)
+        if bible_available(language):
+            corrected_body, surviving_refs, flags = verify_and_correct_scripture(body, lang=language)
             frontmatter["scripture_references"] = surviving_refs
             frontmatter["reviewer_notes"]["flags"] = (
                 frontmatter["reviewer_notes"]["flags"] + [f"[scripture] {f}" for f in flags])
@@ -1069,8 +1100,8 @@ def llm_generate_article(
             # Flagged so this is visible in the editorial review, not silent.
             frontmatter["reviewer_notes"]["flags"] = frontmatter["reviewer_notes"]["flags"] + [
                 "[scripture] Scripture citations were NOT independently verified against "
-                "a KJV text (bundled dataset unavailable) -- double-check "
-                "quotations before publishing."
+                f"a {BIBLES.get(language, BIBLES['en'])[1]} text (bundled dataset unavailable) -- "
+                "double-check quotations before publishing."
             ]
             frontmatter["article_markdown"] = body
         # Known service facts win over whatever the model wrote.
@@ -1080,6 +1111,7 @@ def llm_generate_article(
             if service.get("date"):
                 frontmatter["preached_on"] = service["date"]
         frontmatter["needs_review"] = compute_needs_review(frontmatter["reviewer_notes"]["flags"])
+        frontmatter["language"] = language
         return frontmatter
 
     # --- Step 1: get or build combined notes ---
@@ -1256,7 +1288,8 @@ def build_article_html(article: Dict[str, Any]) -> str:
         f'<meta name="twitter:title" content="{esc(title)}"/>',
         f'<meta name="twitter:description" content="{esc(description)}"/>',
     ]
-    return ("<!doctype html>\n<html lang=\"en\">\n<head>\n" + "\n".join(head)
+    lang = esc(article.get("language") or "en")
+    return (f"<!doctype html>\n<html lang=\"{lang}\">\n<head>\n" + "\n".join(head)
             + "\n</head>\n<body>\n" + body_html + "\n</body>\n</html>\n")
 
 
@@ -1342,6 +1375,8 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
         print(f"[{utc_now_iso()}] Already processed: {candidate_id}")
         return
 
+    language = (os.environ.get("VIDEO_LANGUAGE") or "").strip().lower() or detect_language(title)
+    print(f"[{utc_now_iso()}] Article language: {language}")
     if end_time:
         print(f"[{utc_now_iso()}] Processing ended livestream: {candidate_id} — {title} (ended {end_time})")
     else:
@@ -1369,7 +1404,7 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
             write_text(transcript_txt_path, segments_to_text(segs))
     else:
         segs, transcript_source = get_transcript(
-            candidate_id, media_dir, cfg["transcription"], video_duration_seconds,
+            candidate_id, media_dir, transcription_cfg_for(cfg, language), video_duration_seconds,
             title=title, end_time=end_time,
         )
         transcript_json = [{"start": s.start, "end": s.end, "text": s.text} for s in segs]
@@ -1479,6 +1514,10 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
         llm_cfg = cfg["llm"].copy()
         llm_cfg["model_path"] = env_or(llm_cfg.get("model_path", ""), "LLM_MODEL_PATH")
         style_guide_path = env_or(llm_cfg.get("style_guide_path", ""), "STYLE_GUIDE_PATH")
+        if language != "en":
+            # The main style guide describes the English preacher's voice; other
+            # languages use their own (languages.<lang>.style_guide_path) or none.
+            style_guide_path = language_settings(cfg, language).get("style_guide_path") or ""
         style_guide = ""
         if style_guide_path and os.path.exists(style_guide_path):
             with open(style_guide_path, "r", encoding="utf-8") as f:
@@ -1486,10 +1525,11 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
         elif style_guide_path:
             print(f"[{utc_now_iso()}] WARNING: style_guide_path set but not found: {style_guide_path}")
         backend = build_backend(llm_cfg)
-        service = build_service_info(cfg, candidate_id, title, end_time or "", video_duration_seconds)
+        service = build_service_info(cfg, candidate_id, title, end_time or "", video_duration_seconds,
+                                     language=language)
         print(f"[{utc_now_iso()}] Service details for the article: {service}")
         article = llm_generate_article(backend, sermon_text, llm_cfg, job_dir, style_guide=style_guide,
-                                       service=service)
+                                       service=service, language=language)
         write_json(article_json_path, article)
 
     # Finished markdown: frontmatter (everything except the body itself)

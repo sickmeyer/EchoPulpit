@@ -190,7 +190,7 @@ USER_PROMPT_TEMPLATE = """Below is a pastoral style guide describing how this sp
 ## Service details (authoritative -- use these for the attribution line and frontmatter)
 
 {service_details}
-
+{language_instructions}
 ## Pastoral style guide
 
 {style_guide}
@@ -201,3 +201,47 @@ USER_PROMPT_TEMPLATE = """Below is a pastoral style guide describing how this sp
 {sermon_text}
 ---
 """
+
+
+# Appended to the user prompt per article language (empty for English). The
+# system prompt stays in English -- Claude follows English instructions and
+# writes Spanish output well -- so this block only says what changes.
+LANGUAGE_INSTRUCTIONS = {
+    "en": "",
+    "es": """
+## Language: Spanish
+
+The sermon was preached in Spanish and the transcript is Spanish. Write the
+entire article in Spanish -- natural, warm Latin American Spanish, as this
+preacher would write it himself, keeping the first-person pastoral voice --
+including the title, H2 headings, body, meta_description (140-160
+characters), focus_keyword, keywords (terms Spanish speakers actually
+search for), and alternate_titles. The slug uses Spanish words but plain
+ASCII: lowercase, hyphens, no accents or ñ (e.g. "santificado-sea-tu-nombre-mateo-6-9").
+
+Scripture: wherever the system prompt says KJV, use the Reina Valera Gómez
+(RVG) instead. Quote the RVG exactly -- its wording, spelling, accents and
+punctuation. Cite with Spanish book names, e.g. (Juan 3:16),
+(1 Corintios 13:4-7), (Salmos 23:1), (Apocalipsis 3:20), in the same
+blockquote format with straight double quotes:
+> "Porque de tal manera amó Dios al mundo, ..." (Juan 3:16)
+primary_passage and scripture_references use the same Spanish names.
+
+Cultural tact: the congregation is Hispanic and from many countries. Keep
+the truth plain, even when it confronts, but with respect and warmth --
+no sarcasm or mockery (it reads as humiliation in Spanish), neutral Spanish
+rather than one country's slang, honor toward family. Flag as [editorial]
+anything touching immigration or immigration status, Catholicism or other
+named religions, or politics of any country; the style guide's "Cultura y
+tacto" section has the details.
+
+Attribution line, in Spanish, at the very bottom:
+*Adaptado de un mensaje predicado de {pasaje} por {predicador}.*
+(leave out "por {predicador}" if no preacher is known).
+
+reviewer_notes (corrections, additions, flags) are read by an
+English-speaking reviewer: write them in English, quoting Spanish words as
+they appear. Frontmatter keys stay exactly as specified, in English.
+""",
+}
+

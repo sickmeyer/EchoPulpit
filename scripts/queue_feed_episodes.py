@@ -15,6 +15,11 @@ resolves back to this exact episode.
 Dry run by default. Usage:
     python scripts/queue_feed_episodes.py --top 10            # first 10 in feed order
     python scripts/queue_feed_episodes.py --top 10 --apply
+    python scripts/queue_feed_episodes.py --date 2026-09-20 --title "Servicio en" --apply
+                                                          # one service, by date and title
+
+Each job's language is taken from its title ("Servicio en Español" -> es,
+see sermon_pipeline.detect_language) unless --language is given.
 Env: FEED_URL (default: the worker config's subsplash_feed_url),
 TABLE_NAME (default EchoPulpitJobs), AWS_REGION (default us-east-1).
 """
@@ -31,7 +36,7 @@ from botocore.exceptions import ClientError
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, ROOT)
-from sermon_pipeline import SUBSPLASH_JOB_ID_PREFIX, parse_podcast_feed  # noqa: E402
+from sermon_pipeline import SUBSPLASH_JOB_ID_PREFIX, _http_get, detect_language, parse_podcast_feed  # noqa: E402
 
 
 def _default_feed_url() -> str:
@@ -41,13 +46,24 @@ def _default_feed_url() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--top", type=int, required=True, help="queue the first N episodes in feed order")
+    ap.add_argument("--top", type=int, help="queue the first N (matching) episodes in feed order")
+    ap.add_argument("--date", help="only episodes dated YYYY-MM-DD")
+    ap.add_argument("--title", help="only episodes whose title contains this text (case-insensitive)")
+    ap.add_argument("--language", choices=["en", "es"], help="override the language detected from the title")
     ap.add_argument("--apply", action="store_true", help="actually write the jobs (default: dry run)")
     args = ap.parse_args()
 
     feed_url = os.environ.get("FEED_URL") or _default_feed_url()
-    with urllib.request.urlopen(feed_url, timeout=60) as resp:
-        episodes = parse_podcast_feed(resp.read())[: args.top]
+    with _http_get(feed_url, 60) as resp:
+        episodes = parse_podcast_feed(resp.read())
+    if args.date:
+        episodes = [e for e in episodes if e.pub_date.isoformat() == args.date]
+    if args.title:
+        episodes = [e for e in episodes if args.title.casefold() in e.title.casefold()]
+    if args.top:
+        episodes = episodes[: args.top]
+    if not (args.top or args.date or args.title):
+        ap.error("give --top, --date and/or --title")
 
     table = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1")).Table(
         os.environ.get("TABLE_NAME", "EchoPulpitJobs"))
@@ -55,7 +71,8 @@ def main() -> None:
     for e in episodes:
         key = e.guid or hashlib.sha1(e.audio_url.encode()).hexdigest()
         video_id = f"{SUBSPLASH_JOB_ID_PREFIX}{key}"
-        label = f"{e.pub_date}  {e.duration_seconds / 60:4.0f} min  {e.title}"
+        language = args.language or detect_language(e.title)
+        label = f"{e.pub_date}  {e.duration_seconds / 60:4.0f} min  [{language}]  {e.title}"
         if not args.apply:
             print(f"would queue {video_id}  {label}")
             continue
@@ -69,6 +86,7 @@ def main() -> None:
                     "video_duration_seconds": Decimal(str(e.duration_seconds)),
                     "claimed_at": "1970-01-01T00:00:00+00:00",
                     "failure_count": 0,
+                    "language": language,
                 },
                 ConditionExpression="attribute_not_exists(video_id)",
             )

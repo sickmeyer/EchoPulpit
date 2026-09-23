@@ -102,6 +102,9 @@ done
 VIDEO_TITLE="$(tag SermonVideoTitle)"
 VIDEO_DURATION_SECONDS="$(tag SermonVideoDurationSeconds)"
 VIDEO_END_TIME="$(tag SermonVideoEndTime)"
+# "es" for the Spanish service (Spanish article); empty/"None" = English.
+VIDEO_LANGUAGE="$(tag SermonLanguage)"
+if [[ "$VIDEO_LANGUAGE" == "None" ]]; then VIDEO_LANGUAGE=""; fi
 
 if [[ -z "$VIDEO_ID" || "$VIDEO_ID" == "None" ]]; then
   echo "[$(now)] ERROR: no SermonVideoId tag found on this instance -- aborting"
@@ -253,7 +256,7 @@ S3_PREFIX="s3://${ARTIFACTS_BUCKET}/sermons/${VIDEO_ID}/"
 
 cd "$APP_DIR"
 export CONFIG_PATH="${APP_DIR}/config.yaml"
-export VIDEO_ID VIDEO_TITLE VIDEO_DURATION_SECONDS VIDEO_END_TIME
+export VIDEO_ID VIDEO_TITLE VIDEO_DURATION_SECONDS VIDEO_END_TIME VIDEO_LANGUAGE
 export SERMON_JOBS_TABLE="${SERMON_JOBS_TABLE:-EchoPulpitJobs}"
 # yt-dlp (installed into the venv via requirements-worker.txt) is invoked
 # as a subprocess by sermon_pipeline.py, which looks for it via PATH --

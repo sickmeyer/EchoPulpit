@@ -26,6 +26,14 @@ sermon_extraction:
   window_minutes: 12
   drop_threshold_segments: 8
 
+# Optional: services preached in other languages (see deploy/config.worker.yaml).
+# languages:
+#   es:
+#     whisper_language: "es"
+#     caption_langs: ["es", "es-419", "es-MX", "es-US"]
+#     default_preacher: "Pastor Name"
+#     style_guide_path: ""
+
 church:
   timezone: "America/Chicago"   # service dates are shown in this timezone
 

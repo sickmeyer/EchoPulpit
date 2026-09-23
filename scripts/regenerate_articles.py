@@ -97,12 +97,16 @@ def regenerate(job, full_cfg, style_guide, apply):
 
     start = time.time()
     backend = sp.ClaudeBackend(anthropic.Anthropic(), llm_cfg["claude_model"])
+    language = job.get("language") or sp.detect_language(job.get("title", ""))
     service = sp.build_service_info(full_cfg, vid, job.get("title", ""), job.get("actual_end_time", ""),
-                                    float(job.get("video_duration_seconds") or 0))
+                                    float(job.get("video_duration_seconds") or 0), language=language)
+    if language != "en":
+        guide_path = sp.language_settings(full_cfg, language).get("style_guide_path") or ""
+        style_guide = open(guide_path, encoding="utf-8").read() if guide_path and os.path.exists(guide_path) else ""
     with tempfile.TemporaryDirectory() as job_dir:
         try:
             article = sp.llm_generate_article(backend, sermon_text, dict(llm_cfg), job_dir,
-                                              style_guide=style_guide, service=service)
+                                              style_guide=style_guide, service=service, language=language)
         except anthropic.APIStatusError as e:  # streamed requests raise the base class
             if "credit balance" in str(e).lower():
                 raise CreditError(str(e)) from e

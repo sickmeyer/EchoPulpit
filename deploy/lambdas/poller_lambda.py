@@ -80,13 +80,17 @@ def _get_recent_video_ids(youtube, playlist_id: str, max_results: int) -> list:
 _SPANISH_TITLE_MARKERS = ("español", "espanol", "spanish")
 
 
+def store_language(store, video_id: str, fallback: str) -> str:
+    """The language recorded on the job (a retried job keeps its original)."""
+    item = store._get(video_id) or {}
+    return item.get("language") or fallback
+
+
 def _is_spanish(video: dict) -> bool:
     """
-    The pipeline is English-only (Whisper language="en", Claude prompt
-    assumes English pastoral prose) -- skip Spanish-language services
-    rather than run them through it and produce a garbled/wrong-language
-    article. Prefers YouTube's own language metadata when uploaders set it;
-    falls back to a title keyword check since that's not always populated.
+    Whether this is a Spanish-language service (it gets a Spanish article).
+    Prefers YouTube's own language metadata when uploaders set it; falls
+    back to a title keyword check since that's not always populated.
     """
     snippet = video.get("snippet", {})
     lang = (snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "").lower()
@@ -112,7 +116,8 @@ def _get_ended_livestreams(youtube, video_ids: list) -> list:
     return ended
 
 
-def _launch_worker(video_id: str, title: str, duration_seconds: float, end_time: str) -> str:
+def _launch_worker(video_id: str, title: str, duration_seconds: float, end_time: str,
+                   language: str = "en") -> str:
     kwargs = {
         "ImageId": AMI_ID,
         "InstanceType": INSTANCE_TYPE,
@@ -135,6 +140,7 @@ def _launch_worker(video_id: str, title: str, duration_seconds: float, end_time:
                 {"Key": "SermonVideoTitle", "Value": (title or "")[:255]},
                 {"Key": "SermonVideoDurationSeconds", "Value": str(duration_seconds)},
                 {"Key": "SermonVideoEndTime", "Value": end_time or ""},
+                {"Key": "SermonLanguage", "Value": language or "en"},
             ],
         }],
     }
@@ -170,6 +176,7 @@ def lambda_handler(event, context):
                     vid, item.get("title", ""),
                     float(item.get("video_duration_seconds", 0) or 0),
                     item.get("actual_end_time", ""),
+                    item.get("language") or "en",
                 )
             except Exception as e:
                 print(f"Launch failed for reclaimed job {vid}: {e}")
@@ -186,9 +193,9 @@ def lambda_handler(event, context):
     for video in ended:
         video_id = video["id"]
         title = video["snippet"]["title"]
-        if _is_spanish(video):
-            print(f"Skipping Spanish-language video {video_id} ({title!r}) -- pipeline is English-only")
-            continue
+        # Spanish services get Spanish articles (Whisper "es", RVG scripture);
+        # the worker reads the language from its SermonLanguage tag.
+        language = "es" if _is_spanish(video) else "en"
         end_time = video["liveStreamingDetails"]["actualEndTime"]
         try:
             duration_seconds = _iso8601_duration_to_seconds(
@@ -201,7 +208,7 @@ def lambda_handler(event, context):
         should_launch = False
 
         if status is None:
-            should_launch = store.claim_new(video_id, title, end_time, duration_seconds)
+            should_launch = store.claim_new(video_id, title, end_time, duration_seconds, language=language)
         elif status == FAILED:
             should_launch = store.retry_failed(video_id)
         # QUEUED/LAUNCHING/IN_PROGRESS/COMPLETE: leave alone (already handled
@@ -209,7 +216,8 @@ def lambda_handler(event, context):
 
         if should_launch:
             try:
-                instance_id = _launch_worker(video_id, title, duration_seconds, end_time)
+                instance_id = _launch_worker(video_id, title, duration_seconds, end_time,
+                                            store_language(store, video_id, language))
             except Exception as e:
                 print(f"Launch failed for new job {video_id}: {e}")
                 continue

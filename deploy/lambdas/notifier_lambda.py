@@ -40,6 +40,19 @@ NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "America/Chicago")
 # Publisher Lambda's Function URL; when set, completion emails carry a
 # signed "Review & publish" link to it (see publisher_lambda.py).
 PUBLISH_URL = os.environ.get("PUBLISH_URL", "")
+# Extra recipients for article emails in a given language, e.g.
+# NOTIFY_EXTRA_RECIPIENTS_ES="preacher@example.org" -- the Spanish service's
+# preacher also reviews and can publish its articles. Failure alerts go only
+# to NOTIFY_RECIPIENT_ADDRESS.
+
+
+def _recipients(language: str) -> list:
+    extra = os.environ.get(f"NOTIFY_EXTRA_RECIPIENTS_{(language or 'en').upper()}", "")
+    out = [RECIPIENT]
+    for addr in (a.strip() for a in extra.split(",")):
+        if addr and addr.lower() not in {o.lower() for o in out}:
+            out.append(addr)
+    return out
 PUBLISH_KEY_SECRET = os.environ.get("PUBLISH_KEY_SECRET", "echopulpit/publish-signing-key")
 
 _s3 = boto3.client("s3", region_name=REGION)
@@ -223,8 +236,9 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
         _subject("Review needed" if needs_review else "Article ready", title, video_id, end_time),
         "utf-8",
     )
+    recipients = _recipients(article.get("language") or "en")
     msg["From"] = SENDER
-    msg["To"] = RECIPIENT
+    msg["To"] = ", ".join(recipients)
 
     decisions, info = _split_flags(flags)
     link = _publish_link(video_id)
@@ -289,7 +303,7 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
         print(f"Could not attach sermon transcript for {video_id}: {e}")
 
     _ses.send_raw_email(
-        Source=SENDER, Destinations=[RECIPIENT], RawMessage={"Data": msg.as_string()}
+        Source=SENDER, Destinations=recipients, RawMessage={"Data": msg.as_string()}
     )
     print(f"Sent COMPLETE email for {video_id}")
 

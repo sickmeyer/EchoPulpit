@@ -596,6 +596,28 @@ the ceiling itself costs nothing. A safety-classifier decline
 (`stop_reason: "refusal"`) is logged and handled like any other empty
 generation, so the job fails with an alert instead of shipping nothing.
 
+### Spanish services
+
+A service whose title marks it as Spanish ("Servicio en Español", or any
+title containing "español"/"spanish") is processed in Spanish end to end.
+The poller tags the worker with `SermonLanguage=es`, and settings come
+from `languages.es` in the config:
+
+- captions/Whisper in Spanish (`whisper_language`, `caption_langs`);
+- the article is written in Spanish with `prompts/style_guide_es.md`
+  (written as from a Spanish-speaking pastor, including a section on
+  cultural tact), while `reviewer_notes` stay in English;
+- scripture is quoted from and verified against the Reina Valera Gómez
+  (`data/rvg.json`, built by `scripts/build_rvg.py` from eBible.org; the
+  copyright notice is in `data/RVG-NOTICE.txt`);
+- the preacher defaults to `default_preacher` when the feed doesn't name one;
+- the notification also goes to `NOTIFY_EXTRA_RECIPIENTS_ES` (comma-separated,
+  set on the notifier by `setup_publisher.py` from the same env var);
+- published posts get `lang: es` and appear under the blog's `/es/` section.
+
+To backfill a Spanish service from the Subsplash feed:
+`python scripts/queue_feed_episodes.py --date YYYY-MM-DD --title "Servicio en" --apply`.
+
 ### Output
 
 Per-video artifacts land in `<output.dir>/<video_id>/`:
@@ -707,6 +729,7 @@ delete its file from the blog repo.
 | `scripts/queue_feed_episodes.py --top N` | Queue the first N Subsplash feed episodes as jobs (dry run by default) |
 | `scripts/reverify_scripture.py VIDEO_ID...` | Apply KJV verification to articles generated while `data/kjv.json` was missing, rebuild their outputs, and re-send the email (dry run by default; no Claude calls) |
 | `scripts/build_kjv.py` | Rebuild `data/kjv.json` from the public-domain source, refusing anything incomplete |
+| `scripts/build_rvg.py` | Rebuild `data/rvg.json` (Reina Valera Gómez) from eBible.org, refusing anything incomplete |
 
 The Python scripts use your local AWS credentials; run them from the repo
 root after `pip install -r requirements.txt`.

@@ -50,7 +50,8 @@ BLOG_URL = os.environ.get("BLOG_URL", "").rstrip("/")
 FEED_URL = os.environ.get("SUBSPLASH_FEED_URL", "")
 CHURCH_TZ = ZoneInfo(os.environ.get("CHURCH_TIMEZONE", "America/Chicago"))
 
-SERVICES = ["Sunday Main Worship", "Sunday Afternoon Worship", "Weekly Bible Hour", "Midweek Worship Service"]
+SERVICES = ["Sunday Main Worship", "Sunday Afternoon Worship", "Weekly Bible Hour", "Midweek Worship Service",
+            "Servicio en Español"]
 SUBSPLASH_PREFIX = "subsplash-"
 ITUNES = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
@@ -184,6 +185,8 @@ def build_post(article: dict, job: dict, preacher: str, pub_date: str, episode) 
         "audioUrl": episode["audio"] if episode else None,
         "videoUrl": None if vid.startswith(SUBSPLASH_PREFIX) else f"https://www.youtube.com/watch?v={vid}",
         "sourceId": vid,
+        # Blog shows "es" posts under /es/ (English is the default, left out).
+        "lang": None if (article.get("language") or "en") == "en" else article["language"],
     }
     front = {k: v for k, v in front.items() if v not in (None, "")}
     body = separate_blockquotes((article.get("article_markdown") or "").strip() + "\n")
@@ -401,7 +404,8 @@ def lambda_handler(event, context):
         return review_page(token, job, article, f"Publishing failed, nothing was published: {e}", form)
 
     slug = path.rsplit("/", 1)[-1][len(pub_date) + 1:-3]
-    post_url = f"{BLOG_URL}/posts/{article.get('slug') or slug}/" if BLOG_URL else ""
+    lang_prefix = "" if (article.get("language") or "en") == "en" else f"/{article['language']}"
+    post_url = f"{BLOG_URL}{lang_prefix}/posts/{article.get('slug') or slug}/" if BLOG_URL else ""
     _table.update_item(
         Key={"video_id": vid},
         UpdateExpression="SET published_url = :u, published_path = :p, published_commit = :c, "
