@@ -500,14 +500,15 @@ against a bundled public-domain KJV text (`data/kjv.json`): references that
 resolve get their quoted text replaced with the authoritative wording
 (catching anything the model misremembered), and references that don't
 resolve are removed entirely and logged in `reviewer_notes.flags` --
-nothing invented gets a free pass. **`data/kjv.json` isn't currently bundled**
-(the build script kept failing against its source repeatedly and was
-dropped rather than shipping a partial/unreliable dataset) -- `kjv_available()`
-gates this cleanly, so verification is skipped entirely rather than run
-against an empty dataset, and every article gets a `reviewer_notes.flags`
-entry saying scripture wasn't independently verified. Claude's own accuracy
-is relied on for now; dropping in a real `data/kjv.json` re-enables full
-verification with no other code changes.
+nothing invented gets a free pass. `data/kjv.json` (all 31,102 verses,
+built from the public-domain [aruljohn/Bible-kjv](https://github.com/aruljohn/Bible-kjv)
+dataset) is bundled in the repo and synced to workers with the rest of the
+app code; `python scripts/build_kjv.py` rebuilds it, and refuses to write
+anything short of the complete 66 books / 1,189 chapters / 31,102 verses.
+If the file is ever missing, `kjv_available()` skips verification rather
+than running it against an empty dataset (which would strip every
+citation), and the article gets a `reviewer_notes.flags` entry saying
+scripture wasn't independently verified.
 
 **Pastoral style guide** (`prompts/style_guide.md`, set via
 `llm.style_guide_path` / `STYLE_GUIDE_PATH`) describes how a specific
