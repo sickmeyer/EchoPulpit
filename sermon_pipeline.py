@@ -870,6 +870,21 @@ def normalize_article_frontmatter(frontmatter: Dict[str, Any]) -> Dict[str, Any]
 
 
 MIN_ARTICLE_WORD_COUNT = int(os.environ.get("MIN_ARTICLE_WORD_COUNT", "800"))
+# A real sermon runs well over a thousand words; anything this short means
+# the recording was an aborted/silent stream or transcription failed. Given
+# near-empty input the model writes a whole sermon anyway -- invented text,
+# preacher and date (seen 2026-09-23: 5 transcribed words -> 1,800-word
+# article) -- so stop before generation instead.
+MIN_SERMON_WORDS = int(os.environ.get("MIN_SERMON_WORDS", "400"))
+
+
+def check_sermon_text_length(sermon_text: str) -> None:
+    words = len((sermon_text or "").split())
+    if words < MIN_SERMON_WORDS:
+        raise RuntimeError(
+            f"Sermon transcript has only {words} words (minimum {MIN_SERMON_WORDS}) -- "
+            "likely a silent/aborted stream or failed transcription; not generating an article"
+        )
 MIN_RAW_OUTPUT_CHARS = int(os.environ.get("MIN_RAW_OUTPUT_CHARS", "500"))
 
 
@@ -1248,6 +1263,7 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
             write_json(sermon_json_path, sermon_json)
             write_text(sermon_txt_path, sermon_text)
 
+    check_sermon_text_length(sermon_text)
 
     # 4) local LLM article generation (skip if article artifacts exist)
     # Controls:
