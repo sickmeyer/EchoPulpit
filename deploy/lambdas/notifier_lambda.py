@@ -79,6 +79,31 @@ def _subject(status: str, title: str, video_id: str, end_time: str) -> str:
     return subject
 
 
+def _seo_lines(article: dict) -> list:
+    """SEO fields laid out for copying into a blog/CMS by hand. The same
+    fields are in article.md's frontmatter and article.html's <meta> tags."""
+    if not article:
+        return []
+    description = article.get("meta_description", "")
+    keywords = []
+    for k in [article.get("focus_keyword", "")] + list(article.get("keywords") or []):
+        k = str(k).strip()
+        if k and k.casefold() not in {o.casefold() for o in keywords}:
+            keywords.append(k)
+    lines = ["SEO -- for your blog or website", "-" * 31]
+    lines.append(f"Title: {article.get('title', '')}")
+    if article.get("slug"):
+        lines.append(f"URL slug: {article['slug']}")
+    length_note = "" if 140 <= len(description) <= 160 else " -- aim for 140-160"
+    lines.append(f"Meta description ({len(description)} characters{length_note}):")
+    lines.append(f"  {description}")
+    if article.get("focus_keyword"):
+        lines.append(f"Focus keyword: {article['focus_keyword']}")
+    if keywords:
+        lines.append(f"Meta keywords: {', '.join(keywords)}")
+    return lines
+
+
 def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: str):
     # s3_prefix looks like "s3://bucket/sermons/<id>/"
     prefix = s3_prefix.split(f"s3://{ARTIFACTS_BUCKET}/", 1)[-1]
@@ -87,6 +112,7 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
     md_key = f"{prefix}article.md"
     sermon_txt_key = f"{prefix}sermon.txt"
 
+    article = {}
     meta_description = ""
     needs_review = True
     reviewer_notes = {}
@@ -124,7 +150,9 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
             f"{len(additions)} scripture addition(s) -- see the PDF's "
             "Reviewer Notes section for details."
         )
-    msg.attach(MIMEText("\n".join(body_lines), "plain"))
+        body_lines.append("")
+    body_lines.extend(_seo_lines(article))
+    msg.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
 
     try:
         pdf_obj = _s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=pdf_key)

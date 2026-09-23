@@ -30,12 +30,11 @@ import tempfile
 import boto3
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import markdown  # noqa: E402
 import yaml  # noqa: E402
 
 from render_pdf import render_pdf  # noqa: E402
 from scripture_lookup import kjv_available, verify_and_correct_scripture  # noqa: E402
-from sermon_pipeline import parse_article_markdown  # noqa: E402
+from sermon_pipeline import build_article_html, parse_article_markdown  # noqa: E402
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 BUCKET = os.environ.get("ARTIFACTS_BUCKET", "echopulpit-artifacts")
@@ -105,18 +104,7 @@ def reverify(video_id: str, apply: bool) -> None:
 
         html_path = os.path.join(tmp, "article.html")
         with open(html_path, "w", encoding="utf-8") as f:
-            f.write(f"""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>{article.get("title","Sermon Article")}</title>
-<meta name="description" content="{article.get("meta_description","")}"/>
-</head>
-<body>
-{markdown.markdown(body)}
-</body>
-</html>
-""")
+            f.write(build_article_html(article))
 
         pdf_path = os.path.join(tmp, "sermon-article.pdf")
         render_pdf(

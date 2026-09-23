@@ -621,7 +621,13 @@ you filter by kind:
   PDF, Markdown, and sermon transcript attached (the transcript lets you
   check the article against what was actually preached). "Review needed"
   means the article has flags in its Reviewer Notes to look at before
-  publishing.
+  publishing. The email body ends with an **SEO** block to copy into any
+  blog or CMS: title, URL slug, meta description (with its length checked
+  against the 140-160 character target), focus keyword, and meta keywords.
+  The same fields are in `article.md`'s frontmatter (`meta_description`,
+  `focus_keyword`, `keywords`) and in `article.html` as `<meta
+  name="description">`, `<meta name="keywords">`, `author`, and Open Graph
+  / Twitter tags.
 - **Failed (attempt N)** -- sent on each failed attempt; a job gets 3
   attempts before it's left `FAILED` (see Troubleshooting).
 - The date is the service's local date (from the stream's end time), which

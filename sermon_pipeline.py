@@ -1098,6 +1098,51 @@ def llm_generate_article(
         return _finalize(frontmatter, body)
 
 
+def article_meta_keywords(article: Dict[str, Any]) -> List[str]:
+    """Focus keyword first, then the supporting keywords, de-duplicated
+    case-insensitively -- the list for a <meta name="keywords"> tag."""
+    out: List[str] = []
+    for k in [article.get("focus_keyword", "")] + list(article.get("keywords") or []):
+        k = str(k).strip()
+        if k and k.casefold() not in {o.casefold() for o in out}:
+            out.append(k)
+    return out
+
+
+def build_article_html(article: Dict[str, Any]) -> str:
+    """Standalone article.html with the SEO metadata a CMS or browser
+    preview expects: title, meta description, meta keywords and basic Open
+    Graph / Twitter tags. Every value is HTML-escaped -- titles and
+    descriptions routinely contain quotes."""
+    import html as _html
+
+    esc = lambda s: _html.escape(str(s or ""), quote=True)  # noqa: E731
+    title = article.get("title") or "Sermon Article"
+    description = article.get("meta_description", "")
+    keywords = article_meta_keywords(article)
+    body_html = markdown.markdown(article.get("article_markdown", ""))
+    head = [
+        '<meta charset="utf-8"/>',
+        '<meta name="viewport" content="width=device-width, initial-scale=1"/>',
+        f"<title>{esc(title)}</title>",
+        f'<meta name="description" content="{esc(description)}"/>',
+    ]
+    if keywords:
+        head.append(f'<meta name="keywords" content="{esc(", ".join(keywords))}"/>')
+    if article.get("preacher"):
+        head.append(f'<meta name="author" content="{esc(article["preacher"])}"/>')
+    head += [
+        '<meta property="og:type" content="article"/>',
+        f'<meta property="og:title" content="{esc(title)}"/>',
+        f'<meta property="og:description" content="{esc(description)}"/>',
+        '<meta name="twitter:card" content="summary"/>',
+        f'<meta name="twitter:title" content="{esc(title)}"/>',
+        f'<meta name="twitter:description" content="{esc(description)}"/>',
+    ]
+    return ("<!doctype html>\n<html lang=\"en\">\n<head>\n" + "\n".join(head)
+            + "\n</head>\n<body>\n" + body_html + "\n</body>\n</html>\n")
+
+
 def write_json(path: str, obj: Any):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
@@ -1345,20 +1390,7 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
 
     # Ensure we have a standalone HTML file (even if we didn't run LLM this time)
     if not file_exists_nonempty(html_path):
-        article_body_html = markdown.markdown(article.get("article_markdown", ""))
-        html_doc = f"""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>{article.get("title","Sermon Article")}</title>
-<meta name="description" content="{article.get("meta_description","")}"/>
-</head>
-<body>
-{article_body_html}
-</body>
-</html>
-"""
-        write_text(html_path, html_doc)
+        write_text(html_path, build_article_html(article))
         print(f"[{utc_now_iso()}] Wrote article HTML: {html_path}")
 
     # 5) render PDF (skip if already exists)
