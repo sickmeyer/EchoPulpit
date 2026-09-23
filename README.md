@@ -1,10 +1,16 @@
-## EchoPulpit (YouTube / Subsplash -> Transcribe -> Sermon -> Article -> PDF -> Email)
+## EchoPulpit (YouTube / Subsplash -> Transcribe -> Sermon -> Article -> PDF -> Email -> Publish)
 
 Turns a church's YouTube livestream into an SEO-ready blog article (Markdown
 frontmatter + PDF) using Claude, with no ongoing infrastructure cost between
 sermons: a scheduled check detects a newly-ended livestream, a stock EC2
 instance (a temporary cloud server -- "EC2" is Amazon's virtual-machine
-service) does the work, emails you the result, and terminates itself.
+service) does the work, emails you the result, and terminates itself. The
+email carries a **Review & publish** button that commits the article to
+your blog once you've approved it.
+
+English and Spanish services are both supported: a Spanish service gets a
+Spanish article, with scripture checked against the Reina Valera Gómez
+instead of the KJV -- see "Spanish services" below.
 
 If your church streams through **Subsplash** (which restreams to YouTube),
 EchoPulpit can optionally pull the sermon audio from your Subsplash podcast
@@ -324,7 +330,7 @@ DynamoDB (EchoPulpitJobs): claim newly-ended video, or retry/reclaim stale jobs
         ▼
 EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         │  bootstrap.sh (EC2 user-data, on boot):
-        │   1. read video_id/title/duration from own instance tags
+        │   1. read video_id/title/duration/language from own instance tags
         │   2. install ffmpeg (static build) + create a Python venv
         │   3. sync app code from S3, install deps into the venv
         │   4. fetch ANTHROPIC_API_KEY (required) and yt-dlp cookies
@@ -333,6 +339,7 @@ EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         │      if available, else Whisper on audio from the Subsplash feed
         │      (if configured) or YouTube; refuse near-empty transcripts;
         │      Claude writes the article; scripture checked against KJV
+        │      (Reina Valera Gómez for Spanish services)
         │   6. upload artifacts + this boot log to S3
         │   7. record COMPLETE/FAILED in DynamoDB
         │   8. terminate self (+ boot-time watchdog force-terminates at
@@ -340,6 +347,9 @@ EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         ▼
 DynamoDB Streams ──triggers──> Notifier Lambda ──SES──> your inbox
                      (PDF + Markdown + sermon transcript; failure alerts too)
+        │
+        ▼  "Review & publish" link in the email (signed, single-use)
+Publisher Lambda ──GitHub API──> blog repo (the site rebuilds itself)
 ```
 
 Nothing runs, and nothing costs money, between sermons. No custom AMI (a
@@ -351,10 +361,11 @@ Claude-primary. Rough cost at weekly-sermon cadence: Lambda + DynamoDB + S3
 + SES are all effectively free at this volume; the real line items are
 Claude API usage per article and a CPU instance per sermon (`m7g.xlarge` by
 default, AWS Graviton/arm64 -- see "Spot vs on-demand" below). A job takes
-about 1 minute of setup, Whisper transcription at roughly 0.4x the audio's
-length (~15 minutes for a 35-minute service, ~35 for a 90-minute one), and
-2-3 minutes for Claude -- around 10 cents of compute per sermon. Well under
-$5/month total at weekly cadence, versus $100+/month for a 24/7 container.
+about 1 minute of setup, Whisper transcription at roughly 0.4-0.6x the
+audio's length (a 54-minute Spanish service took 31 minutes), and 3-4
+minutes for Claude -- around 10 cents of compute per sermon. The AWS side is
+well under $5/month at weekly cadence, versus $100+/month for a 24/7
+container; Claude usage is billed separately by Anthropic, per article.
 
 ### Supporting infrastructure
 
@@ -674,7 +685,7 @@ model) decides whether an article needs review:
 | Tag | Means | Marks "Review needed"? |
 |---|---|---|
 | `[editorial]` | A judgment call to agree with: political/cultural material, named individuals, sensitive pastoral subjects, other named churches or denominations | Yes |
-| `[scripture]` | Citation ambiguity, or a quotation the KJV check removed | Yes |
+| `[scripture]` | Citation ambiguity, or a quotation the Bible check (KJV, or RVG for Spanish) removed | Yes |
 | `[transcript]` | The transcript is incomplete; says how the gap was handled | No -- informational |
 | `[attribution]` | Preacher or date couldn't be confirmed | No -- informational |
 
@@ -726,8 +737,8 @@ delete its file from the blog repo.
 | `deploy/verify.sh --pre` / `--post` | Read-only preflight / health check of every AWS resource |
 | `deploy/requeue-failed.sh` | Put `FAILED` jobs back in the queue once the cause is fixed (dry run by default; `--cookies`, `--force`, specific IDs) |
 | `deploy/seed-ffmpeg-mirror.sh` | One-time seed of the S3 ffmpeg mirror |
-| `scripts/queue_feed_episodes.py --top N` | Queue the first N Subsplash feed episodes as jobs (dry run by default) |
-| `scripts/reverify_scripture.py VIDEO_ID...` | Apply KJV verification to articles generated while `data/kjv.json` was missing, rebuild their outputs, and re-send the email (dry run by default; no Claude calls) |
+| `scripts/queue_feed_episodes.py --top N` or `--date YYYY-MM-DD [--title TEXT]` | Queue Subsplash feed episodes as jobs: the first N, or those from one service date (optionally only titles containing TEXT). The language is detected from the title (`--language` overrides). Dry run by default; `--apply` to queue |
+| `scripts/reverify_scripture.py VIDEO_ID...` | (English articles) Apply KJV verification to articles generated while `data/kjv.json` was missing, rebuild their outputs, and re-send the email (dry run by default; no Claude calls) |
 | `scripts/build_kjv.py` | Rebuild `data/kjv.json` from the public-domain source, refusing anything incomplete |
 | `scripts/build_rvg.py` | Rebuild `data/rvg.json` (Reina Valera Gómez) from eBible.org, refusing anything incomplete |
 
@@ -747,6 +758,13 @@ missing or misconfigured, before you go digging through the console.
   there. The DynamoDB item for that `video_id` also has an `error` field
   with the last failure reason and a `failure_count` (jobs auto-retry up to
   3 times before being left `FAILED` for manual review).
+- **Skipping a job you don't want** (a duplicate, or an old service the
+  poller picked up). Terminate its worker (the `instance_id` on the job),
+  then set the job's `status` to `SKIPPED` in DynamoDB. The poller never
+  relaunches a `SKIPPED` job, and no email is sent. Note that the poller
+  processes any newly-ended livestream on the channel's recent uploads,
+  so a Subsplash backfill of a service that also has a YouTube stream
+  produces two jobs for the same sermon.
 - **Every job fails with "Sign in to confirm you're not a bot".**
   YouTube is blocking audio downloads from AWS. Best fix: if your church
   streams via Subsplash, set `subsplash_feed_url` (see "Audio source:
