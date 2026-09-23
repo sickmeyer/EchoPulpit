@@ -246,12 +246,14 @@ def is_subsplash_job(video_id: str) -> bool:
 
 
 class FeedEpisode:
-    def __init__(self, title: str, pub_date, duration_seconds: float, audio_url: str, guid: str = ""):
+    def __init__(self, title: str, pub_date, duration_seconds: float, audio_url: str, guid: str = "",
+                 author: str = ""):
         self.title = title
         self.pub_date = pub_date  # datetime.date
         self.duration_seconds = duration_seconds
         self.audio_url = audio_url
         self.guid = guid
+        self.author = author  # itunes:author -- the preacher, when the church fills it in
 
     def __repr__(self):
         return f"FeedEpisode({self.title!r}, {self.pub_date}, {self.duration_seconds:.0f}s)"
@@ -284,6 +286,7 @@ def parse_podcast_feed(xml_bytes: bytes) -> List[FeedEpisode]:
         episodes.append(FeedEpisode(
             (item.findtext("title") or "").strip(), pub_date, duration, enclosure.get("url"),
             guid=(item.findtext("guid") or "").strip(),
+            author=(item.findtext("itunes:author", default="", namespaces=_ITUNES_NS) or "").strip(),
         ))
     return episodes
 
@@ -315,9 +318,57 @@ def match_feed_episode(
 
 
 def _http_get(url: str, timeout: int):
+    import ssl
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": "EchoPulpit/1.0 (+sermon article pipeline)"})
-    return urllib.request.urlopen(req, timeout=timeout)
+    context = None
+    try:  # certifi's CA bundle when available (some Windows Python installs can't load the system store)
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    return urllib.request.urlopen(req, timeout=timeout, context=context)
+
+
+def find_feed_episode(feed_url: str, video_id: str, title: str, end_time_iso: str,
+                      video_duration_seconds: float) -> Optional[FeedEpisode]:
+    """This job's feed episode, if any: by guid for jobs queued from the
+    feed, else by title + date. One fetch, no waiting; None on any error."""
+    try:
+        with _http_get(feed_url, SUBSPLASH_HTTP_TIMEOUT_SECONDS) as resp:
+            episodes = parse_podcast_feed(resp.read())
+    except Exception as e:
+        print(f"[{utc_now_iso()}] Subsplash feed fetch failed ({e})")
+        return None
+    if is_subsplash_job(video_id):
+        guid = video_id[len(SUBSPLASH_JOB_ID_PREFIX):]
+        return next((e for e in episodes if e.guid == guid), None)
+    return match_feed_episode(episodes, title, end_time_iso, video_duration_seconds)
+
+
+def build_service_info(cfg: Dict[str, Any], video_id: str, title: str, end_time_iso: str,
+                       video_duration_seconds: float) -> Dict[str, Any]:
+    """Facts about the service EchoPulpit already knows -- service name,
+    local date, and (from the Subsplash feed) the preacher -- passed to
+    article generation so the model neither guesses nor flags them."""
+    info: Dict[str, Any] = {"title": title}
+    tz_name = (cfg.get("church") or {}).get("timezone", "America/Chicago")
+    if end_time_iso:
+        try:
+            from zoneinfo import ZoneInfo
+            ended = datetime.fromisoformat(end_time_iso.replace("Z", "+00:00"))
+            info["date"] = ended.astimezone(ZoneInfo(tz_name)).date().isoformat()
+        except Exception:
+            pass
+    feed_url = (cfg.get("transcription") or {}).get("subsplash_feed_url")
+    if feed_url:
+        episode = find_feed_episode(feed_url, video_id, title, end_time_iso, video_duration_seconds)
+        if episode:
+            if episode.author:
+                info["preacher"] = episode.author
+            if is_subsplash_job(video_id):
+                info["date"] = episode.pub_date.isoformat()
+    return info
 
 
 def download_subsplash_audio(
@@ -808,9 +859,8 @@ keywords: ["...", "..."]
 primary_passage: "Book Chapter:Verse-Verse"
 scripture_references: ["Book Chapter:Verse", "..."]
 preacher: "..."
-preached_on: "..."
+preached_on: "YYYY-MM-DD"
 word_count: 1800
-needs_review: true
 alternate_titles:
   - "..."
   - "..."
@@ -824,7 +874,7 @@ reviewer_notes:
   additions:
     - "..."
   flags:
-    - "..."
+    - "[editorial|scripture|transcript|attribution] ..."
 ---
 
 # {title}
@@ -855,6 +905,54 @@ def repair_article_markdown(backend, bad: str, cfg: Dict[str, Any]) -> str:
     )
 
 
+# ---- Reviewer flags ----
+# Each flag is a string starting with a category tag, e.g.
+# "[editorial] Softened the political aside about ...". Categories that
+# need a human decision before publishing mark the article "Review needed";
+# informational ones don't. Untagged flags (older articles, and anything
+# the model forgot to tag) count as needing review -- the safe default.
+FLAG_CATEGORIES = ("editorial", "scripture", "transcript", "attribution")
+REVIEW_FLAG_CATEGORIES = {"editorial", "scripture", "other"}
+_FLAG_TAG_RE = re.compile(r"^\s*\[(\w+)\]\s*")
+
+
+def flag_category(flag: str) -> str:
+    m = _FLAG_TAG_RE.match(str(flag))
+    if m and m.group(1).lower() in FLAG_CATEGORIES:
+        return m.group(1).lower()
+    # Flags written by the scripture verifier itself (untagged in older
+    # articles) are scripture flags.
+    if re.match(r"\s*(Removed unverifiable scripture citation|Scripture citations were NOT)", str(flag)):
+        return "scripture"
+    return "other"
+
+
+def flag_text(flag: str) -> str:
+    """The flag without its category tag."""
+    return _FLAG_TAG_RE.sub("", str(flag), count=1) if flag_category(flag) in FLAG_CATEGORIES else str(flag)
+
+
+def compute_needs_review(flags: List[str]) -> bool:
+    return any(flag_category(f) in REVIEW_FLAG_CATEGORIES for f in flags)
+
+
+def build_service_details(service: Optional[Dict[str, Any]]) -> str:
+    """The 'Service details' block for the user prompt: facts EchoPulpit
+    already knows, so the model doesn't guess them or flag them missing."""
+    service = service or {}
+    lines = []
+    if service.get("title"):
+        lines.append(f"- Service: {service['title']}")
+    if service.get("date"):
+        lines.append(f"- Preached on: {service['date']}")
+    if service.get("preacher"):
+        lines.append(f"- Preacher: {service['preacher']}")
+    else:
+        lines.append("- Preacher: not known -- use a name only if the transcript makes it clear, "
+                     "otherwise write the attribution line without one")
+    return "\n".join(lines)
+
+
 def normalize_article_frontmatter(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
     """Make the model's frontmatter safe + predictable for downstream usage."""
 
@@ -875,7 +973,6 @@ def normalize_article_frontmatter(frontmatter: Dict[str, Any]) -> Dict[str, Any]
         "preacher": "",
         "preached_on": "",
         "word_count": 0,
-        "needs_review": True,
         "alternate_titles": [],
         "reviewer_notes": {},
     }
@@ -890,8 +987,6 @@ def normalize_article_frontmatter(frontmatter: Dict[str, Any]) -> Dict[str, Any]
     for k in ["title", "slug", "meta_description", "focus_keyword", "primary_passage", "preacher", "preached_on"]:
         frontmatter[k] = ensure_str(frontmatter.get(k))
 
-    frontmatter["needs_review"] = bool(frontmatter.get("needs_review"))
-
     try:
         frontmatter["word_count"] = int(frontmatter.get("word_count") or 0)
     except (TypeError, ValueError):
@@ -903,6 +998,9 @@ def normalize_article_frontmatter(frontmatter: Dict[str, Any]) -> Dict[str, Any]
     for k in ["corrections", "additions", "flags"]:
         reviewer_notes[k] = ensure_list(reviewer_notes.get(k))
     frontmatter["reviewer_notes"] = reviewer_notes
+    # EchoPulpit decides, not the model (which marked every article for
+    # review, including ones with no flags at all).
+    frontmatter["needs_review"] = compute_needs_review(reviewer_notes["flags"])
 
     if len(frontmatter["alternate_titles"]) > 7:
         frontmatter["alternate_titles"] = frontmatter["alternate_titles"][:7]
@@ -930,7 +1028,8 @@ MIN_RAW_OUTPUT_CHARS = int(os.environ.get("MIN_RAW_OUTPUT_CHARS", "500"))
 
 
 def llm_generate_article(
-    backend, sermon_text: str, cfg: Dict[str, Any], job_dir: str, style_guide: str = ""
+    backend, sermon_text: str, cfg: Dict[str, Any], job_dir: str, style_guide: str = "",
+    service: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Frontmatter-first, context-safe generation:
@@ -952,16 +1051,16 @@ def llm_generate_article(
 
     def _fill_template(template: str, text: str) -> str:
         # Avoid Python .format() entirely to prevent brace/key errors.
-        return template.replace("{sermon_text}", text).replace("{style_guide}", style_guide)
+        return (template.replace("{sermon_text}", text).replace("{style_guide}", style_guide)
+                .replace("{service_details}", build_service_details(service)))
 
     def _finalize(frontmatter: Dict[str, Any], body: str) -> Dict[str, Any]:
         frontmatter = normalize_article_frontmatter(frontmatter)
         if kjv_available():
             corrected_body, surviving_refs, flags = verify_and_correct_scripture(body)
             frontmatter["scripture_references"] = surviving_refs
-            frontmatter["reviewer_notes"]["flags"] = frontmatter["reviewer_notes"]["flags"] + flags
-            if flags:
-                frontmatter["needs_review"] = True
+            frontmatter["reviewer_notes"]["flags"] = (
+                frontmatter["reviewer_notes"]["flags"] + [f"[scripture] {f}" for f in flags])
             frontmatter["article_markdown"] = corrected_body
         else:
             # No bundled KJV dataset available -- trust the model's own
@@ -969,12 +1068,18 @@ def llm_generate_article(
             # empty dataset (which would incorrectly strip every quote).
             # Flagged so this is visible in the editorial review, not silent.
             frontmatter["reviewer_notes"]["flags"] = frontmatter["reviewer_notes"]["flags"] + [
-                "Scripture citations were NOT independently verified against "
+                "[scripture] Scripture citations were NOT independently verified against "
                 "a KJV text (bundled dataset unavailable) -- double-check "
                 "quotations before publishing."
             ]
-            frontmatter["needs_review"] = True
             frontmatter["article_markdown"] = body
+        # Known service facts win over whatever the model wrote.
+        if service:
+            if service.get("preacher"):
+                frontmatter["preacher"] = service["preacher"]
+            if service.get("date"):
+                frontmatter["preached_on"] = service["date"]
+        frontmatter["needs_review"] = compute_needs_review(frontmatter["reviewer_notes"]["flags"])
         return frontmatter
 
     # --- Step 1: get or build combined notes ---
@@ -1381,7 +1486,10 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
         elif style_guide_path:
             print(f"[{utc_now_iso()}] WARNING: style_guide_path set but not found: {style_guide_path}")
         backend = build_backend(llm_cfg)
-        article = llm_generate_article(backend, sermon_text, llm_cfg, job_dir, style_guide=style_guide)
+        service = build_service_info(cfg, candidate_id, title, end_time or "", video_duration_seconds)
+        print(f"[{utc_now_iso()}] Service details for the article: {service}")
+        article = llm_generate_article(backend, sermon_text, llm_cfg, job_dir, style_guide=style_guide,
+                                       service=service)
         write_json(article_json_path, article)
 
     # Finished markdown: frontmatter (everything except the body itself)

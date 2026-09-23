@@ -34,7 +34,7 @@ import yaml  # noqa: E402
 
 from render_pdf import render_pdf  # noqa: E402
 from scripture_lookup import kjv_available, verify_and_correct_scripture  # noqa: E402
-from sermon_pipeline import build_article_html, parse_article_markdown  # noqa: E402
+from sermon_pipeline import build_article_html, compute_needs_review, parse_article_markdown  # noqa: E402
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 BUCKET = os.environ.get("ARTIFACTS_BUCKET", "echopulpit-artifacts")
@@ -59,7 +59,7 @@ def reverify(video_id: str, apply: bool) -> None:
     article = json.loads(_get(prefix + "article.json"))
     notes = article.setdefault("reviewer_notes", {})
     old_flags = notes.get("flags") or []
-    if not any(f.startswith(UNVERIFIED_FLAG_PREFIX) for f in old_flags):
+    if not any(UNVERIFIED_FLAG_PREFIX in f for f in old_flags):
         print(f"{video_id}: skipped (already verified)")
         return
 
@@ -71,11 +71,11 @@ def reverify(video_id: str, apply: bool) -> None:
         print(f"{video_id}: couldn't read the model's needs_review ({e}); keeping review on")
 
     body, refs, new_flags = verify_and_correct_scripture(article.get("article_markdown", ""))
-    kept_flags = [f for f in old_flags if not f.startswith(UNVERIFIED_FLAG_PREFIX)]
-    notes["flags"] = kept_flags + new_flags
+    kept_flags = [f for f in old_flags if UNVERIFIED_FLAG_PREFIX not in f]
+    notes["flags"] = kept_flags + [f"[scripture] {f}" for f in new_flags]
     article["scripture_references"] = refs
     article["article_markdown"] = body
-    article["needs_review"] = model_needs_review or bool(notes["flags"])
+    article["needs_review"] = compute_needs_review(notes["flags"])
 
     changed = sum(
         a != b for a, b in zip(

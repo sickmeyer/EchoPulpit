@@ -1,0 +1,39 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadArticles",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::${ARTIFACTS_BUCKET}/sermons/*"
+    },
+    {
+      "Sid": "ReadAndMarkJobs",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}"
+    },
+    {
+      "Sid": "ReadPublishSecrets",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": [
+        "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:echopulpit/publish-signing-key-*",
+        "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:echopulpit/github-token-*"
+      ]
+    },
+    {
+      "Sid": "OwnLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/echopulpit-publisher:*"
+    }
+  ]
+}

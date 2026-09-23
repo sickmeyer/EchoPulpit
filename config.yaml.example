@@ -26,6 +26,9 @@ sermon_extraction:
   window_minutes: 12
   drop_threshold_segments: 8
 
+church:
+  timezone: "America/Chicago"   # service dates are shown in this timezone
+
 llm:
   # Article generation uses Claude if ANTHROPIC_API_KEY is set in the
   # environment (fast, no local model load, small per-call cost) and falls

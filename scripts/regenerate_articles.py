@@ -78,7 +78,12 @@ def select_jobs(args):
                   key=lambda j: j.get("actual_end_time", ""))
 
 
-def regenerate(job, llm_cfg, style_guide, apply):
+class CreditError(RuntimeError):
+    """The Anthropic account is out of credit -- stop instead of failing every job."""
+
+
+def regenerate(job, full_cfg, style_guide, apply):
+    llm_cfg = full_cfg["llm"]
     vid = job["video_id"]
     prefix = f"sermons/{vid}/"
     label = f"{vid} ({job.get('title', '')}, {service_date(job)})"
@@ -92,8 +97,16 @@ def regenerate(job, llm_cfg, style_guide, apply):
 
     start = time.time()
     backend = sp.ClaudeBackend(anthropic.Anthropic(), llm_cfg["claude_model"])
+    service = sp.build_service_info(full_cfg, vid, job.get("title", ""), job.get("actual_end_time", ""),
+                                    float(job.get("video_duration_seconds") or 0))
     with tempfile.TemporaryDirectory() as job_dir:
-        article = sp.llm_generate_article(backend, sermon_text, dict(llm_cfg), job_dir, style_guide=style_guide)
+        try:
+            article = sp.llm_generate_article(backend, sermon_text, dict(llm_cfg), job_dir,
+                                              style_guide=style_guide, service=service)
+        except anthropic.APIStatusError as e:  # streamed requests raise the base class
+            if "credit balance" in str(e).lower():
+                raise CreditError(str(e)) from e
+            raise
 
         frontmatter_only = {k: v for k, v in article.items() if k != "article_markdown"}
         outputs = {
@@ -126,7 +139,9 @@ def regenerate(job, llm_cfg, style_guide, apply):
     table.update_item(Key={"video_id": vid}, UpdateExpression="SET s3_prefix = :p",
                       ExpressionAttributeValues={":p": job["s3_prefix"]})
     words = len(article.get("article_markdown", "").split())
+    review = "Review needed" if article.get("needs_review") else "Article ready"
     return (f"done   {label}: {words} words, '{article.get('title', '')}' "
+            f"[{review}, {len((article.get('reviewer_notes') or {}).get('flags') or [])} flag(s)] "
             f"({time.time() - start:.0f}s) -- email re-sent")
 
 
@@ -141,7 +156,8 @@ def main():
     if not args.ids and not (args.date_from and args.date_to):
         ap.error("give video IDs or --from and --to")
 
-    llm_cfg = yaml.safe_load(open("deploy/config.worker.yaml", encoding="utf-8"))["llm"]
+    full_cfg = yaml.safe_load(open("deploy/config.worker.yaml", encoding="utf-8"))
+    llm_cfg = full_cfg["llm"]
     style_guide = get_text("app/prompts/style_guide.md")
     if args.apply and not os.environ.get("ANTHROPIC_API_KEY"):
         os.environ["ANTHROPIC_API_KEY"] = boto3.client("secretsmanager", region_name=REGION).get_secret_value(
@@ -150,15 +166,27 @@ def main():
     jobs = select_jobs(args)
     print(f"{len(jobs)} job(s) selected; model {llm_cfg['claude_model']}, "
           f"claude_max_tokens {llm_cfg.get('claude_max_tokens')}, effort {llm_cfg.get('thinking_effort')}\n")
-    failed = 0
+    failed, out_of_credit = 0, False
     with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
-        futures = {pool.submit(regenerate, j, llm_cfg, style_guide, args.apply): j for j in jobs}
+        futures = {pool.submit(regenerate, j, full_cfg, style_guide, args.apply): j for j in jobs}
         for f in as_completed(futures):
             try:
                 print(f.result(), flush=True)
+            except CreditError:
+                failed += 1
+                if not out_of_credit:
+                    out_of_credit = True
+                    print("STOPPING: the Anthropic account is out of credit. Cancelling jobs not yet started.",
+                          flush=True)
+                    for other in futures:
+                        other.cancel()
+                print(f"FAILED {futures[f]['video_id']}: out of credit", flush=True)
             except Exception as e:
                 failed += 1
                 print(f"FAILED {futures[f]['video_id']}: {e!r}", flush=True)
+    not_run = sum(1 for f in futures if f.cancelled())
+    if not_run:
+        print(f"{not_run} job(s) not attempted (cancelled after the credit error).")
     if not args.apply:
         print("\nDry run -- nothing changed. Re-run with --apply.")
     elif failed:

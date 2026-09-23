@@ -15,8 +15,10 @@ and the email would never send. FAILED, by contrast, is a single atomic
 update (mark_failed sets status+error together), so a status transition is
 the right signal there.
 """
+import html
 import os
 import json
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from email.mime.multipart import MIMEMultipart
@@ -26,6 +28,8 @@ from email.mime.text import MIMEText
 
 import boto3
 
+from publish_token import make_token
+
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 SENDER = os.environ["SES_SENDER_ADDRESS"]
 RECIPIENT = os.environ["NOTIFY_RECIPIENT_ADDRESS"]
@@ -33,9 +37,61 @@ ARTIFACTS_BUCKET = os.environ["SERMON_ARTIFACTS_BUCKET"]
 # Timezone the service date in subject lines is shown in -- the stream's end
 # time is UTC, which would put an evening service on the next day's date.
 NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "America/Chicago")
+# Publisher Lambda's Function URL; when set, completion emails carry a
+# signed "Review & publish" link to it (see publisher_lambda.py).
+PUBLISH_URL = os.environ.get("PUBLISH_URL", "")
+PUBLISH_KEY_SECRET = os.environ.get("PUBLISH_KEY_SECRET", "echopulpit/publish-signing-key")
 
 _s3 = boto3.client("s3", region_name=REGION)
 _ses = boto3.client("ses", region_name=REGION)
+_secrets = boto3.client("secretsmanager", region_name=REGION)
+_signing_key = None
+
+
+def _publish_link(video_id: str) -> str:
+    """Signed single-article publish link, or "" when publishing isn't set up."""
+    global _signing_key
+    if not PUBLISH_URL:
+        return ""
+    try:
+        if _signing_key is None:
+            _signing_key = _secrets.get_secret_value(SecretId=PUBLISH_KEY_SECRET)["SecretString"].encode("utf-8")
+        return f"{PUBLISH_URL.rstrip('/')}/?t={make_token(_signing_key, video_id)}"
+    except Exception as e:  # never let the link block the email itself
+        print(f"Could not create publish link for {video_id}: {e}")
+        return ""
+
+
+# Reviewer flags start with a category tag ("[editorial] ..."); these
+# categories are decisions for the reviewer, the rest are informational.
+# Same rules as sermon_pipeline.flag_category.
+_FLAG_CATEGORIES = ("editorial", "scripture", "transcript", "attribution")
+_DECISION_CATEGORIES = {"editorial", "scripture", "other"}
+_TAG = re.compile(r"^\s*\[(\w+)\]\s*")
+
+
+def _flag_category(flag: str) -> str:
+    m = _TAG.match(str(flag))
+    if m and m.group(1).lower() in _FLAG_CATEGORIES:
+        return m.group(1).lower()
+    if re.match(r"\s*(Removed unverifiable scripture citation|Scripture citations were NOT)", str(flag)):
+        return "scripture"
+    return "other"
+
+
+def _flag_text(flag: str) -> str:
+    return _TAG.sub("", str(flag), count=1) if _flag_category(flag) in _FLAG_CATEGORIES else str(flag)
+
+
+def _flag_label(flag: str) -> str:
+    c = _flag_category(flag)
+    return "note" if c == "other" else c
+
+
+def _split_flags(flags: list) -> tuple:
+    decisions = [f for f in flags if _flag_category(f) in _DECISION_CATEGORIES]
+    info = [f for f in flags if _flag_category(f) not in _DECISION_CATEGORIES]
+    return decisions, info
 
 
 def _ddb_value(v):
@@ -104,6 +160,37 @@ def _seo_lines(article: dict) -> list:
     return lines
 
 
+def _html_body(article, description, link, button_label, decisions, info, corrections, additions) -> str:
+    """HTML version of the completion email: the publish button plus the
+    same notes as the plain-text part. Inline styles only (email clients)."""
+    esc = html.escape
+
+    def flag_list(items):
+        return "<ul style='margin:6px 0 14px;padding-left:20px'>" + "".join(
+            f"<li style='margin:4px 0'><b style='text-transform:uppercase;font-size:11px;letter-spacing:.05em;"
+            f"color:#6d7782'>{esc(_flag_label(f))}</b> {esc(_flag_text(f))}</li>" for f in items) + "</ul>"
+
+    parts = [f"<p style='font-size:16px;margin:0 0 16px'>{esc(description)}</p>"]
+    if link:
+        parts.append(
+            f"<p style='margin:0 0 20px'><a href='{esc(link)}' style='display:inline-block;background:#064060;"
+            f"color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 22px;border-radius:8px'>"
+            f"{esc(button_label)}</a></p>")
+    if decisions:
+        parts.append(f"<h3 style='margin:0;font-size:15px'>Decisions to review before publishing</h3>{flag_list(decisions)}")
+    if info:
+        parts.append(f"<h3 style='margin:0;font-size:15px'>For your information</h3>{flag_list(info)}")
+    if corrections or additions:
+        parts.append(f"<p style='color:#4a545e'>Automatically made {len(corrections)} correction(s) and "
+                     f"{len(additions)} scripture addition(s); see the PDF's Reviewer Notes for details.</p>")
+    seo = _seo_lines(article)
+    if seo:
+        parts.append("<pre style='white-space:pre-wrap;font-family:Consolas,Menlo,monospace;font-size:13px;"
+                     f"background:#f5f3ee;padding:12px;border-radius:8px'>{esc(chr(10).join(seo))}</pre>")
+    return ("<div style='font-family:-apple-system,Segoe UI,Arial,sans-serif;color:#1d2329;max-width:640px'>"
+            + "".join(parts) + "</div>")
+
+
 def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: str):
     # s3_prefix looks like "s3://bucket/sermons/<id>/"
     prefix = s3_prefix.split(f"s3://{ARTIFACTS_BUCKET}/", 1)[-1]
@@ -139,10 +226,20 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
     msg["From"] = SENDER
     msg["To"] = RECIPIENT
 
+    decisions, info = _split_flags(flags)
+    link = _publish_link(video_id)
+    button_label = "Review & publish" if needs_review else "Publish to blog"
+
     body_lines = [meta_description, ""]
-    if flags:
-        body_lines.append("Flagged for your review before publishing:")
-        body_lines.extend(f"- {f}" for f in flags)
+    if link:
+        body_lines += [f"{button_label}: {link}", ""]
+    if decisions:
+        body_lines.append("Decisions to review before publishing:")
+        body_lines.extend(f"- [{_flag_label(f)}] {_flag_text(f)}" for f in decisions)
+        body_lines.append("")
+    if info:
+        body_lines.append("For your information:")
+        body_lines.extend(f"- [{_flag_label(f)}] {_flag_text(f)}" for f in info)
         body_lines.append("")
     if corrections or additions:
         body_lines.append(
@@ -152,7 +249,12 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: st
         )
         body_lines.append("")
     body_lines.extend(_seo_lines(article))
-    msg.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
+
+    body = MIMEMultipart("alternative")
+    body.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
+    body.attach(MIMEText(_html_body(article, meta_description, link, button_label, decisions, info,
+                                    corrections, additions), "html", "utf-8"))
+    msg.attach(body)
 
     try:
         pdf_obj = _s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=pdf_key)

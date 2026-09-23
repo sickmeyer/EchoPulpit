@@ -35,6 +35,11 @@ sermon_extraction:
   window_minutes: 12
   drop_threshold_segments: 8
 
+church:
+  # Service dates given to article generation are the stream's end time in
+  # this timezone (an evening service ends after midnight UTC).
+  timezone: "America/Chicago"
+
 llm:
   # Switched from claude-sonnet-5 on 2026-09-23 after a blind side-by-side
   # on three sermons. ~4x the cost per article (~$0.35-0.70 vs ~$0.14).

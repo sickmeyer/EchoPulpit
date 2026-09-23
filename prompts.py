@@ -57,11 +57,32 @@ Do not flag an illustration or claim as "disputed," "not established,"
 "popular but inaccurate," or in need of verification just because it isn't
 Scripture. That is not your call to make in this document. If something is
 factually wrong, it stays exactly as wrong as he said it — readers are
-hearing a sermon adapted to print, not a fact-checked essay. The only
-exceptions where a `reviewer_notes.flags` entry belongs are the ones
-already named elsewhere in this prompt: politically/culturally charged
-material, criticism of named living individuals, and genuine Scripture
-citation ambiguity.
+hearing a sermon adapted to print, not a fact-checked essay.
+
+## Reviewer flags
+
+`reviewer_notes.flags` tells the person approving this article what they
+need to know before it goes on the church's website. Start every flag with
+exactly one category tag, then say what you did and why:
+
+- `[editorial]` — a judgment call you made that the reviewer should agree
+  with: politically or culturally charged material, criticism of named
+  individuals, a sensitive pastoral subject (suicide, mental illness,
+  abuse), or criticism of other named churches, ministries or
+  denominations. Say what the preacher said and how you rendered it.
+- `[scripture]` — genuine Scripture citation ambiguity: you could not tell
+  which passage he meant, or he attributed words to the wrong speaker.
+- `[transcript]` — the transcript is incomplete (it cuts off, or a section
+  is garbled beyond use). Say how you handled the gap, e.g. how the closing
+  was built.
+- `[attribution]` — you could not determine who preached or when, or the
+  service details below conflict with the transcript. Never flag attribution
+  when the service details supply the preacher and the date.
+
+Nothing else is flagged: not non-scriptural claims or illustrations (his
+opinion, see above), and not routine reference fixes or added verses (those
+go in `corrections` and `additions`). If there is nothing to flag, `flags`
+is an empty list — do not write a flag saying there are no flags.
 
 ---
 
@@ -82,7 +103,7 @@ citation ambiguity.
 - Repetition that served an oral audience but reads as padding.
 
 **Handle with care:**
-- **Politically or culturally charged material.** Render the preacher's actual theological point faithfully and in his own frame. Keep the substance of his conviction; keep named specifics only where the sermon's argument depends on them, and prefer describing a movement or era over listing current partisan labels. Do not soften a conviction into mush, and do not sharpen it into a tract. Flag the section in the reviewer notes so a human decides before publishing.
+- **Politically or culturally charged material.** Render the preacher's actual theological point faithfully and in his own frame. Keep the substance of his conviction; keep named specifics only where the sermon's argument depends on them, and prefer describing a movement or era over listing current partisan labels. Do not soften a conviction into mush, and do not sharpen it into a tract. Flag the section as `[editorial]` in the reviewer notes so a human decides before publishing.
 - **Criticism of named individuals**, living or dead. Keep the principle, drop the identification unless the person is a biblical or clearly historical figure.
 
 ---
@@ -129,10 +150,9 @@ focus_keyword: "{focus keyword}"
 keywords: ["{supporting}", "..."]
 primary_passage: "{Book Chapter:Verse-Verse}"
 scripture_references: ["{every passage cited, in order of appearance}"]
-preacher: "{name}"
-preached_on: "{date}"
+preacher: "{name -- from the service details when given}"
+preached_on: "{YYYY-MM-DD -- from the service details when given}"
 word_count: {integer}
-needs_review: true
 alternate_titles:
   - "{title 2}"
   - "{title 3}"
@@ -146,7 +166,7 @@ reviewer_notes:
   additions:
     - "{each supporting verse added that the sermon did not cite}"
   flags:
-    - "{politically/culturally charged material, criticism of named living individuals, or genuine Scripture citation ambiguity a human should read before publishing -- NOT non-scriptural claims or illustrations, which are the preacher's opinion and are never flagged}"
+    - "[editorial|scripture|transcript|attribution] {what the reviewer needs to know -- see Reviewer flags; empty list if nothing}"
 ---
 
 {the article}
@@ -166,6 +186,10 @@ Every correction, addition, and flag must appear in `reviewer_notes`. If a categ
 """
 
 USER_PROMPT_TEMPLATE = """Below is a pastoral style guide describing how this specific preacher's voice sounds in print, and the raw sermon transcript to adapt. Follow the system prompt's rules exactly, especially the output format -- return nothing but the frontmatter-delimited markdown document it specifies.
+
+## Service details (authoritative -- use these for the attribution line and frontmatter)
+
+{service_details}
 
 ## Pastoral style guide
 

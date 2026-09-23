@@ -93,7 +93,7 @@ def test_normalize_article_frontmatter_fills_defaults():
     assert fm["keywords"] == []
     assert fm["scripture_references"] == []
     assert fm["alternate_titles"] == []
-    assert fm["needs_review"] is True
+    assert fm["needs_review"] is False  # no flags -> nothing to review
     assert fm["word_count"] == 0
     assert fm["reviewer_notes"] == {"corrections": [], "additions": [], "flags": []}
 

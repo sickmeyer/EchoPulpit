@@ -626,9 +626,10 @@ you filter by kind:
 
 - **Article ready** / **Review needed** -- the finished article, with the
   PDF, Markdown, and sermon transcript attached (the transcript lets you
-  check the article against what was actually preached). "Review needed"
-  means the article has flags in its Reviewer Notes to look at before
-  publishing. The email body ends with an **SEO** block to copy into any
+  check the article against what was actually preached), and a **Review &
+  publish** button (see "Review & publish" below). "Review needed" means
+  the article has decisions to look at before publishing -- see "Reviewer
+  flags" below. The email body ends with an **SEO** block to copy into any
   blog or CMS: title, URL slug, meta description (with its length checked
   against the 140-160 character target), focus keyword, and meta keywords.
   The same fields are in `article.md`'s frontmatter (`meta_description`,
@@ -642,6 +643,59 @@ you filter by kind:
   into one conversation by mail clients. It's shown in `America/Chicago` by
   default; set `NOTIFY_TIMEZONE` (any IANA zone, e.g. `America/New_York`)
   before running `setup.sh` to change it.
+
+### Reviewer flags
+
+The model writes each flag with a category tag, and EchoPulpit (not the
+model) decides whether an article needs review:
+
+| Tag | Means | Marks "Review needed"? |
+|---|---|---|
+| `[editorial]` | A judgment call to agree with: political/cultural material, named individuals, sensitive pastoral subjects, other named churches or denominations | Yes |
+| `[scripture]` | Citation ambiguity, or a quotation the KJV check removed | Yes |
+| `[transcript]` | The transcript is incomplete; says how the gap was handled | No -- informational |
+| `[attribution]` | Preacher or date couldn't be confirmed | No -- informational |
+
+Untagged flags (articles from before tagging) count as needing review.
+Article generation is also given what EchoPulpit already knows -- the
+service name, the local service date (`church.timezone` in the worker
+config), and the preacher from the Subsplash feed's episode author when
+the church fills it in -- so those aren't guessed or flagged as missing.
+
+### Review & publish
+
+Every completion email carries a **Review & publish** button (a signed
+link, valid 30 days, that only works for that one article). It opens a
+page served by the `echopulpit-publisher` Lambda showing the article, its
+decisions and informational notes, the corrections made, and editable
+preacher and service-date fields. Publishing:
+
+- requires ticking "I've read the decisions above and accept them" when
+  the article needs review (the acceptance and the flags accepted are
+  recorded on the job in DynamoDB);
+- happens only on the page's **Publish** button, never just by opening the
+  link (mail scanners open links automatically);
+- commits the post to the blog repo (`GITHUB_REPO`/`src/content/posts/`,
+  same format as the blog's own importer, public fields only) through the
+  GitHub API, after which the blog rebuilds in about two minutes;
+- works once per article (`published_at` is claimed conditionally; a
+  failed commit releases it so you can retry).
+
+Setup, safe to re-run (uses boto3, so it works with any AWS CLI version):
+
+```bash
+export ARTIFACTS_BUCKET=... GITHUB_REPO=owner/blog-repo BLOG_URL=https://blog.example.org
+python deploy/setup_publisher.py
+```
+
+It creates the signing key (`echopulpit/publish-signing-key`), the
+publisher Lambda and its public Function URL, and updates the notifier.
+Publishing also needs a GitHub fine-grained token with access to only the
+blog repo and **Contents: Read and write**, which you store yourself:
+`aws secretsmanager create-secret --name echopulpit/github-token
+--secret-string "github_pat_..."`. Until it exists, the review page works
+but Publish reports an error and publishes nothing. To take a post down,
+delete its file from the blog repo.
 
 ### Maintenance scripts
 
