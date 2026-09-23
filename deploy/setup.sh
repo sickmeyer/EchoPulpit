@@ -303,17 +303,29 @@ aws iam put-role-policy --role-name "$FFMPEG_MIRROR_ROLE_NAME" --policy-name ffm
 FFMPEG_MIRROR_ROLE_ARN="$(aws iam get-role --role-name "$FFMPEG_MIRROR_ROLE_NAME" --query 'Role.Arn' --output text)"
 
 (cd "$LAMBDA_DIR" && zip -qj "${BUILD_DIR}/ffmpeg-mirror-lambda.zip" ffmpeg_mirror_refresh_lambda.py)
-FFMPEG_MIRROR_ENV="Variables={SERMON_ARTIFACTS_BUCKET=${ARTIFACTS_BUCKET}}"
+# The Lambda's defaults are amd64, so pass the key/URL for WORKER_ARCH
+# explicitly -- otherwise a Graviton deploy refreshes a mirror no worker
+# reads while the arm64 one bootstrap.sh actually fetches goes stale.
+case "$WORKER_ARCH" in
+  x86_64) FFMPEG_ARCH_SUFFIX="amd64" ;;
+  *)      FFMPEG_ARCH_SUFFIX="arm64" ;;
+esac
+FFMPEG_MIRROR_ENV="Variables={SERMON_ARTIFACTS_BUCKET=${ARTIFACTS_BUCKET},FFMPEG_MIRROR_KEY=deps/ffmpeg-static-linux-${FFMPEG_ARCH_SUFFIX}.tar.xz,FFMPEG_UPSTREAM_URL=https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FFMPEG_ARCH_SUFFIX}-static.tar.xz}"
+# The upstream archive is ~70-80MB compressed, but ffmpeg+ffprobe extract to
+# several hundred MB and then get re-packed alongside -- the default 512MB
+# /tmp ran out of space ("Errno 28") on every run, and 256MB of memory was
+# pegged by the xz decompressor.
+FFMPEG_MIRROR_SIZING="--timeout 300 --memory-size 1024 --ephemeral-storage Size=2048"
 
 if aws lambda get-function --function-name "$FFMPEG_MIRROR_FN_NAME" --region "$REGION" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$FFMPEG_MIRROR_FN_NAME" --region "$REGION" \
     --zip-file "fileb://${BUILD_DIR}/ffmpeg-mirror-lambda.zip" >/dev/null
   aws lambda update-function-configuration --function-name "$FFMPEG_MIRROR_FN_NAME" --region "$REGION" \
-    --environment "$FFMPEG_MIRROR_ENV" --timeout 120 --memory-size 256 >/dev/null
+    --environment "$FFMPEG_MIRROR_ENV" $FFMPEG_MIRROR_SIZING >/dev/null
 else
   aws lambda create-function --function-name "$FFMPEG_MIRROR_FN_NAME" --region "$REGION" \
     --runtime python3.11 --handler ffmpeg_mirror_refresh_lambda.lambda_handler \
-    --role "$FFMPEG_MIRROR_ROLE_ARN" --timeout 120 --memory-size 256 \
+    --role "$FFMPEG_MIRROR_ROLE_ARN" $FFMPEG_MIRROR_SIZING \
     --zip-file "fileb://${BUILD_DIR}/ffmpeg-mirror-lambda.zip" \
     --environment "$FFMPEG_MIRROR_ENV" >/dev/null
 fi
@@ -422,7 +434,7 @@ echo "  1. Verify the SES sender identity: aws ses verify-email-identity --email
 echo "  2. If your SES account is still in the sandbox, also verify the recipient: $NOTIFY_RECIPIENT_ADDRESS"
 echo "  3. Sync app code to s3://$ARTIFACTS_BUCKET/app/ (sermon_pipeline.py, prompts.py, sermon_heuristics.py,"
 echo "     render_pdf.py, storage.py, scripture_lookup.py, requirements-worker.txt, config.yaml, prompts/style_guide.md)"
-echo "  4. Seed s3://$ARTIFACTS_BUCKET/deps/ffmpeg-static-linux-${WORKER_ARCH}.tar.xz once by hand (a single top-level"
+echo "  4. Seed s3://$ARTIFACTS_BUCKET/deps/ffmpeg-static-linux-${FFMPEG_ARCH_SUFFIX}.tar.xz once by hand (a single top-level"
 echo "     dir containing ffmpeg + ffprobe) -- the refresh Lambda keeps it current from there but doesn't create it"
 echo "  5. If you use yt-dlp cookies (optional, see README), tag that secret too:"
 echo "     aws secretsmanager tag-resource --secret-id echopulpit/ytdlp-cookies --tags Key=Project,Value=echopulpit --region $REGION"

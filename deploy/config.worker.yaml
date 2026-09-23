@@ -19,6 +19,15 @@ transcription:
   # Whisper fallback path is unreliable.
   min_caption_coverage: 0.75
   caption_langs: ["en", "en-US", "en-GB"]
+  # Optional (2026-09-22): this church streams via Subsplash, whose podcast
+  # feed has public MP3s with no YouTube bot checks, so audio is taken from
+  # there when the stream has a matching episode, with yt-dlp as the
+  # fallback. Remove these two keys for YouTube-only behavior. See
+  # download_subsplash_audio() in sermon_pipeline.py. The worker re-checks
+  # the feed for up to subsplash_wait_minutes in case the episode hasn't
+  # been published yet when the stream ends.
+  subsplash_feed_url: "https://podcasts.subsplash.com/bg23rt3/podcast.rss"
+  subsplash_wait_minutes: 45
 
 sermon_extraction:
   min_minutes: 12

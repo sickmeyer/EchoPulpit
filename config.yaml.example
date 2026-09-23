@@ -12,6 +12,13 @@ transcription:
   prefer_captions: true       # try YouTube captions before falling back to Whisper
   min_caption_coverage: 0.75  # fall back to Whisper if captions cover less than this fraction of the video
   caption_langs: ["en", "en-US", "en-GB"]
+  # Optional: if your church streams through Subsplash, point this at a
+  # Subsplash podcast feed built from the services' media series. Audio is
+  # then downloaded from there (matched by title + date) instead of from
+  # YouTube, which often blocks cloud servers as bots; yt-dlp remains the
+  # fallback. Leave unset for YouTube-only.
+  # subsplash_feed_url: "https://podcasts.subsplash.com/xxxxxxx/podcast.rss"
+  # subsplash_wait_minutes: 45  # how long to wait for the episode to be published
 
 sermon_extraction:
   min_minutes: 12

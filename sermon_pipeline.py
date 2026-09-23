@@ -216,6 +216,152 @@ def download_audio(video_id: str, out_dir: str) -> str:
     raise RuntimeError("Audio download succeeded but file not found.")
 
 
+# ---- Subsplash podcast feed (primary audio source) ----
+# The church streams through Subsplash, which restreams to YouTube and also
+# archives each service to its own media library. A Subsplash podcast built
+# from that library is a public RSS feed with direct MP3 enclosures -- no
+# bot checks, no cookies -- so it's tried before yt-dlp, which YouTube now
+# blocks from datacenter IPs regardless of cookies (2026-08-23 onward).
+#
+# Feed quirks this has to cope with (observed on the WBT feed):
+#   - items are not in date order
+#   - every pubDate is "<date> 10:00:00 +0000": a calendar day, not the real
+#     broadcast time, so an evening service that ends after midnight UTC is
+#     dated the day *before* YouTube's actualEndTime
+#   - not every YouTube stream gets an episode, and ones that do can post
+#     some time after the stream ends
+SUBSPLASH_HTTP_TIMEOUT_SECONDS = int(os.environ.get("SUBSPLASH_HTTP_TIMEOUT_SECONDS", "60"))
+SUBSPLASH_POLL_INTERVAL_SECONDS = int(os.environ.get("SUBSPLASH_POLL_INTERVAL_SECONDS", "300"))
+_ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+
+
+class FeedEpisode:
+    def __init__(self, title: str, pub_date, duration_seconds: float, audio_url: str):
+        self.title = title
+        self.pub_date = pub_date  # datetime.date
+        self.duration_seconds = duration_seconds
+        self.audio_url = audio_url
+
+    def __repr__(self):
+        return f"FeedEpisode({self.title!r}, {self.pub_date}, {self.duration_seconds:.0f}s)"
+
+
+def _normalize_title(title: str) -> str:
+    return " ".join((title or "").split()).casefold()
+
+
+def parse_podcast_feed(xml_bytes: bytes) -> List[FeedEpisode]:
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    channel = ET.fromstring(xml_bytes).find("channel")
+    episodes = []
+    for item in channel.findall("item") if channel is not None else []:
+        enclosure = item.find("enclosure")
+        pub = item.findtext("pubDate")
+        if enclosure is None or not enclosure.get("url") or not pub:
+            continue
+        try:
+            pub_date = parsedate_to_datetime(pub).date()
+        except (TypeError, ValueError):
+            continue
+        raw_duration = (item.findtext("itunes:duration", default="", namespaces=_ITUNES_NS) or "").strip()
+        try:
+            duration = parse_timestamp_to_seconds(raw_duration)
+        except ValueError:
+            duration = 0.0
+        episodes.append(FeedEpisode((item.findtext("title") or "").strip(), pub_date, duration, enclosure.get("url")))
+    return episodes
+
+
+def match_feed_episode(
+    episodes: List[FeedEpisode],
+    title: str,
+    end_time_iso: str,
+    video_duration_seconds: float,
+) -> Optional[FeedEpisode]:
+    """
+    Find the feed episode for a YouTube stream: same title, dated on the
+    stream's UTC end date or the day before (see feed quirks above). Several
+    services share a title week to week, so the date window is what makes
+    this unambiguous; closest duration breaks any remaining tie.
+    """
+    if not end_time_iso:
+        return None
+    end_date = datetime.fromisoformat(end_time_iso.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+    wanted = _normalize_title(title)
+    candidates = [
+        e for e in episodes
+        if _normalize_title(e.title) == wanted
+        and end_date - timedelta(days=1) <= e.pub_date <= end_date
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda e: abs(e.duration_seconds - video_duration_seconds))
+
+
+def _http_get(url: str, timeout: int):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "EchoPulpit/1.0 (+sermon article pipeline)"})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def download_subsplash_audio(
+    feed_url: str,
+    title: str,
+    end_time_iso: str,
+    video_duration_seconds: float,
+    out_dir: str,
+    wait_minutes: float = 0,
+) -> Optional[str]:
+    """
+    Download this stream's audio from the Subsplash podcast feed. Re-checks
+    the feed every SUBSPLASH_POLL_INTERVAL_SECONDS for up to wait_minutes in
+    case the episode hasn't been published yet. Returns the local file path,
+    or None if no matching episode appeared (caller falls back to yt-dlp).
+    """
+    import time
+
+    deadline = time.time() + wait_minutes * 60
+    while True:
+        try:
+            with _http_get(feed_url, SUBSPLASH_HTTP_TIMEOUT_SECONDS) as resp:
+                episodes = parse_podcast_feed(resp.read())
+            episode = match_feed_episode(episodes, title, end_time_iso, video_duration_seconds)
+        except Exception as e:
+            print(f"[{utc_now_iso()}] Subsplash feed fetch/parse failed ({e})")
+            episode = None
+        if episode:
+            break
+        if time.time() + SUBSPLASH_POLL_INTERVAL_SECONDS > deadline:
+            print(f"[{utc_now_iso()}] No Subsplash episode matching {title!r} (ended {end_time_iso}).")
+            return None
+        print(f"[{utc_now_iso()}] Subsplash episode not published yet; re-checking in {SUBSPLASH_POLL_INTERVAL_SECONDS}s.")
+        time.sleep(SUBSPLASH_POLL_INTERVAL_SECONDS)
+
+    if video_duration_seconds and abs(episode.duration_seconds - video_duration_seconds) > 300:
+        # Seen when a YouTube stream was restarted/split; the Subsplash
+        # archive is the whole service, so it's still the better source.
+        print(f"[{utc_now_iso()}] Note: Subsplash duration {episode.duration_seconds:.0f}s differs from "
+              f"YouTube's {video_duration_seconds:.0f}s")
+    print(f"[{utc_now_iso()}] Downloading Subsplash audio: {episode}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    _clean_audio_leftovers(out_dir)
+    out_path = os.path.join(out_dir, "audio.mp3")
+    try:
+        with _http_get(episode.audio_url, SUBSPLASH_HTTP_TIMEOUT_SECONDS) as resp, open(out_path, "wb") as f:
+            shutil.copyfileobj(resp, f, length=1024 * 1024)
+    except Exception as e:
+        print(f"[{utc_now_iso()}] Subsplash audio download failed ({e})")
+        _clean_audio_leftovers(out_dir)
+        return None
+    if not file_exists_nonempty(out_path):
+        _clean_audio_leftovers(out_dir)
+        return None
+    return out_path
+
+
 def ffmpeg_to_wav(in_path: str, wav_path: str):
     cmd = [
         "ffmpeg", "-y",
@@ -335,11 +481,15 @@ def get_transcript(
     media_dir: str,
     cfg: Dict[str, Any],
     video_duration_seconds: float,
+    title: str = "",
+    end_time: str = "",
 ) -> Tuple[List[Segment], str]:
     """
     Try YouTube captions first (no audio download needed); fall back to
     downloading audio + running Whisper if captions are unavailable,
     unparseable, or don't cover enough of the video's actual duration.
+    Audio comes from the Subsplash podcast feed when cfg has
+    subsplash_feed_url and the stream has a matching episode, else yt-dlp.
     Returns (segments, source) where source is "captions" or "whisper".
     """
     force_whisper = os.environ.get("FORCE_WHISPER", "").lower() in ("1", "true", "yes")
@@ -366,7 +516,15 @@ def get_transcript(
     if file_exists_nonempty(wav_path):
         print(f"[{utc_now_iso()}] Found existing WAV, skipping download/ffmpeg: {wav_path}")
     else:
-        audio_path = download_audio(video_id, media_dir)
+        audio_path = None
+        feed_url = cfg.get("subsplash_feed_url")
+        if feed_url and title and end_time:
+            audio_path = download_subsplash_audio(
+                feed_url, title, end_time, video_duration_seconds, media_dir,
+                wait_minutes=float(cfg.get("subsplash_wait_minutes", 0)),
+            )
+        if not audio_path:
+            audio_path = download_audio(video_id, media_dir)
         ffmpeg_to_wav(audio_path, wav_path)
 
     segs = transcribe_whisper(wav_path, cfg)
@@ -1005,7 +1163,8 @@ def run_pipeline(cfg: Dict[str, Any], store: StateStore):
             write_text(transcript_txt_path, segments_to_text(segs))
     else:
         segs, transcript_source = get_transcript(
-            candidate_id, media_dir, cfg["transcription"], video_duration_seconds
+            candidate_id, media_dir, cfg["transcription"], video_duration_seconds,
+            title=title, end_time=end_time,
         )
         transcript_json = [{"start": s.start, "end": s.end, "text": s.text} for s in segs]
         write_json(transcript_json_path, transcript_json)

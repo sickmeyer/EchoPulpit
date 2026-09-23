@@ -171,7 +171,7 @@ def lambda_handler(event, context):
         Source=SENDER,
         Destination={"ToAddresses": [RECIPIENT]},
         Message={
-            "Subject": {"Data": f"EchoPulpit monthly report -- {month_label}"},
+            "Subject": {"Data": f"[EchoPulpit] Monthly report: {month_label}"},
             "Body": {"Text": {"Data": body}},
         },
     )

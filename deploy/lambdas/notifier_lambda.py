@@ -16,8 +16,11 @@ the right signal there.
 """
 import os
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
+from email.header import Header
 from email.mime.text import MIMEText
 
 import boto3
@@ -26,6 +29,9 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 SENDER = os.environ["SES_SENDER_ADDRESS"]
 RECIPIENT = os.environ["NOTIFY_RECIPIENT_ADDRESS"]
 ARTIFACTS_BUCKET = os.environ["SERMON_ARTIFACTS_BUCKET"]
+# Timezone the service date in subject lines is shown in -- the stream's end
+# time is UTC, which would put an evening service on the next day's date.
+NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "America/Chicago")
 
 _s3 = boto3.client("s3", region_name=REGION)
 _ses = boto3.client("ses", region_name=REGION)
@@ -50,7 +56,29 @@ def _get_field(image: dict, key: str, default=""):
     return _ddb_value(image[key])
 
 
-def _send_complete_email(video_id: str, title: str, s3_prefix: str):
+def _subject(status: str, title: str, video_id: str, end_time: str) -> str:
+    """
+    Every EchoPulpit email subject has the same shape, so recipients can
+    filter on "[EchoPulpit]" for everything or on the status word for one
+    kind:  [EchoPulpit] <Status>: <service title> -- <service date>
+    The date keeps weekly repeats of the same service title (e.g. "Sunday
+    Main Worship") from collapsing into one thread in mail clients.
+    """
+    subject = f"[EchoPulpit] {status}: {title or video_id}"
+    if end_time:
+        try:
+            ended = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+            try:
+                ended = ended.astimezone(ZoneInfo(NOTIFY_TIMEZONE))
+            except Exception:
+                pass  # unknown zone / no tz database: fall back to the UTC date
+            subject += f" — {ended:%b} {ended.day}, {ended.year}"
+        except ValueError:
+            pass
+    return subject
+
+
+def _send_complete_email(video_id: str, title: str, s3_prefix: str, end_time: str):
     # s3_prefix looks like "s3://bucket/sermons/<id>/"
     prefix = s3_prefix.split(f"s3://{ARTIFACTS_BUCKET}/", 1)[-1]
     article_key = f"{prefix}article.json"
@@ -74,10 +102,12 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str):
     additions = reviewer_notes.get("additions") or []
 
     msg = MIMEMultipart()
-    subject = title or f"EchoPulpit article ready: {video_id}"
-    if needs_review:
-        subject = f"[Review needed] {subject}"
-    msg["Subject"] = subject
+    # Header(): the subject can be non-ASCII (the date's em dash, curly
+    # quotes in a service title), which must be RFC 2047-encoded here.
+    msg["Subject"] = Header(
+        _subject("Review needed" if needs_review else "Article ready", title, video_id, end_time),
+        "utf-8",
+    )
     msg["From"] = SENDER
     msg["To"] = RECIPIENT
 
@@ -120,8 +150,8 @@ def _send_complete_email(video_id: str, title: str, s3_prefix: str):
     print(f"Sent COMPLETE email for {video_id}")
 
 
-def _send_failed_email(video_id: str, title: str, error: str, failure_count: str):
-    subject = f"[FAILED] EchoPulpit: {title or video_id}"
+def _send_failed_email(video_id: str, title: str, error: str, failure_count: str, end_time: str):
+    subject = _subject(f"Failed (attempt {failure_count})", title, video_id, end_time)
     body = (
         f"Video {video_id} failed to process (attempt {failure_count}).\n\n"
         f"Error: {error}\n"
@@ -130,8 +160,8 @@ def _send_failed_email(video_id: str, title: str, error: str, failure_count: str
         Source=SENDER,
         Destination={"ToAddresses": [RECIPIENT]},
         Message={
-            "Subject": {"Data": subject},
-            "Body": {"Text": {"Data": body}},
+            "Subject": {"Data": subject, "Charset": "UTF-8"},
+            "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
         },
     )
     print(f"Sent FAILED alert email for {video_id}")
@@ -149,16 +179,17 @@ def lambda_handler(event, context):
         old_status = _get_field(old_image, "status")
         video_id = _get_field(new_image, "video_id")
         title = _get_field(new_image, "title")
+        end_time = _get_field(new_image, "actual_end_time")
 
         old_s3_prefix = _get_field(old_image, "s3_prefix")
         new_s3_prefix = _get_field(new_image, "s3_prefix")
         s3_prefix_just_appeared = bool(new_s3_prefix) and not old_s3_prefix
 
         if new_status == "COMPLETE" and s3_prefix_just_appeared:
-            _send_complete_email(video_id, title, new_s3_prefix)
+            _send_complete_email(video_id, title, new_s3_prefix, end_time)
         elif new_status == "FAILED" and old_status != "FAILED":
             error = _get_field(new_image, "error", "(no error message recorded)")
             failure_count = _get_field(new_image, "failure_count", "?")
-            _send_failed_email(video_id, title, error, failure_count)
+            _send_failed_email(video_id, title, error, failure_count, end_time)
 
     return {"processed": len(event.get("Records", []))}
