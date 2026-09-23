@@ -399,7 +399,18 @@ def transcribe_whisper(wav_path: str, cfg: Dict[str, Any]) -> List[Segment]:
     device = os.environ.get("WHISPER_DEVICE", "cpu")   # cuda|cpu
     compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "float16" if device == "cuda" else "int8")
 
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    # faster-whisper/CTranslate2 use only 4 CPU threads unless told
+    # otherwise. Measured on Graviton3 (15-min sermon clip, medium/int8,
+    # 2026-09-23): 4 threads/4 cores 0.39x realtime; 8/8 cores 0.42x;
+    # 8/16 cores 0.23x; 16/16 cores 0.42x -- i.e. filling every core on a
+    # big box is no faster, but half the cores on a 16-vCPU box is 1.7x
+    # faster. So: all cores up to 8 vCPUs, half of them above that.
+    # WHISPER_CPU_THREADS overrides.
+    cores = os.cpu_count() or 4
+    cpu_threads = int(os.environ.get("WHISPER_CPU_THREADS") or (cores if cores <= 8 else cores // 2))
+    print(f"Whisper: device={device} compute_type={compute_type} cpu_threads={cpu_threads}")
+
+    model = WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=cpu_threads)
 
     print("Starting transcription...")
     segments_iter, _info = model.transcribe(

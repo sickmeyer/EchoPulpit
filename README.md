@@ -1,4 +1,4 @@
-## EchoPulpit (YouTube -> Transcribe -> Sermon -> Article -> PDF -> Email)
+## EchoPulpit (YouTube / Subsplash -> Transcribe -> Sermon -> Article -> PDF -> Email)
 
 Turns a church's YouTube livestream into an SEO-ready blog article (Markdown
 frontmatter + PDF) using Claude, with no ongoing infrastructure cost between
@@ -27,10 +27,17 @@ mid-way:
    see the table below for exactly where to get each one.
 3. **An Anthropic (Claude) API key** -- from [console.anthropic.com](https://console.anthropic.com/).
 4. **An email address you control**, to send *from* and receive reports *at*
-   (can be the same address).
-5. On your own computer: **AWS CLI v2** installed and logged in, plus
+   (can be the same address). If it's on your own domain, you'll also want
+   access to that domain's DNS for one step (Step 3), so emails don't get
+   flagged by Gmail as unverified.
+5. On your own computer: a **recent AWS CLI v2** installed and logged in, plus
    **Python 3.11+**, `pip`, and `zip`. (`aws --version` and `python3
-   --version` to check what you already have.)
+   --version` to check what you already have. Very old 2.0.x releases are
+   missing flags `setup.sh` uses -- update if yours starts with `aws-cli/2.0`.)
+6. *Optional:* if your church streams through **Subsplash**, the URL of a
+   Subsplash podcast feed of your service recordings -- see "Audio source:
+   Subsplash podcast feed". Strongly recommended if you have it: YouTube
+   often blocks audio downloads from cloud servers.
 
 You do **not** need to know Lambda, IAM, or any other AWS service by name --
 the setup script below handles all of that; the explanations here are just
@@ -183,6 +190,25 @@ aws ses verify-email-identity --email-address "$NOTIFY_RECIPIENT_ADDRESS" --regi
 Each address gets a confirmation email from AWS with a verification link --
 click it.
 
+**Recommended: verify your whole domain with DKIM.** Verifying just the
+address lets SES send, but the emails aren't signed as your domain, so Gmail
+shows "This message appears to be sent from your account but Gmail couldn't
+verify this" (they fail your domain's DMARC check). Verifying the domain
+fixes that:
+
+```bash
+aws sesv2 create-email-identity --email-identity yourdomain.com --region "$AWS_REGION" \
+  --query 'DkimAttributes.Tokens' --output text
+```
+
+That prints three tokens. At whoever hosts your domain's DNS (GoDaddy,
+Route 53, Cloudflare, ...), add three **CNAME** records, one per token:
+name `<token>._domainkey` (most DNS hosts add your domain automatically),
+value `<token>.dkim.amazonses.com`. SES usually confirms within an hour;
+`aws sesv2 get-email-identity --email-identity yourdomain.com --query
+DkimAttributes.Status` shows `SUCCESS` once it has. Nothing else changes --
+the same sender address now just arrives signed.
+
 ### Step 4 -- Seed the ffmpeg mirror (recommended, not required)
 
 Worker instances need `ffmpeg` (audio/video processing) at boot. `setup.sh`
@@ -214,8 +240,9 @@ Then confirm the pipeline itself works:
 - Confirm: an EC2 instance launches (visible in the AWS Console under EC2),
   a file shows up at `s3://<bucket>/sermons/<video_id>/bootstrap.log` (the
   full boot-to-finish log -- useful even when things go right), the
-  database entry reaches `COMPLETE`, an email arrives with the PDF
-  attached, and the instance terminates itself shortly after.
+  database entry reaches `COMPLETE`, an email arrives with the PDF,
+  Markdown article, and sermon transcript attached, and the instance
+  terminates itself shortly after.
 - To test a specific video without waiting on the schedule, launch a worker
   instance by hand with the AMI `setup.sh` resolved and tag it
   `SermonVideoId=<id>`, `SermonVideoTitle=<title>`,
@@ -239,10 +266,10 @@ never on disk in this repo.
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key | Poller Lambda only (via Secrets Manager; never touches the worker) | [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → Create API Key, with the "YouTube Data API v3" enabled on the project |
 | `CHANNEL_ID` | The channel's YouTube **channel ID**, not its `@handle` | Poller Lambda | On the channel's YouTube page: Share → Copy channel ID (starts with `UC...`) |
 | `ANTHROPIC_API_KEY` | Claude API key for article generation | Worker (fetched from Secrets Manager at boot) | [console.anthropic.com](https://console.anthropic.com/). v1 is Claude-primary with no local-model fallback baked into the worker -- see "Local-model fallback" below if you want one |
-| yt-dlp cookies (optional but recommended) | Netscape-format cookies from a real logged-in YouTube session | Worker, if the secret exists | YouTube increasingly blocks requests from cloud/datacenter IPs as bot traffic. Export via a browser extension ("Get cookies.txt LOCALLY") rather than `yt-dlp --cookies-from-browser`, which can fail against Chrome's newer cookie encryption on Windows. Store with `aws secretsmanager create-secret --name echopulpit/ytdlp-cookies --secret-string file://cookies.txt --tags Key=Project,Value=echopulpit`. Missing is fine -- the worker just degrades back to whatever success rate captions/no-cookie downloads get |
+| yt-dlp cookies (optional; not needed if you use the Subsplash feed) | Netscape-format cookies from a real logged-in YouTube session | Worker, if the secret exists | YouTube increasingly blocks requests from cloud/datacenter IPs as bot traffic. Export via a browser extension ("Get cookies.txt LOCALLY") rather than `yt-dlp --cookies-from-browser`, which can fail against Chrome's newer cookie encryption on Windows. Store with `aws secretsmanager create-secret --name echopulpit/ytdlp-cookies --secret-string file://cookies.txt --tags Key=Project,Value=echopulpit`. Missing is fine -- the worker just degrades back to whatever success rate captions/no-cookie downloads get |
 | Subsplash podcast feed URL (optional, recommended if you stream via Subsplash) | Public RSS feed of your service recordings, e.g. `https://podcasts.subsplash.com/<id>/podcast.rss` | Worker (`transcription.subsplash_feed_url` in `deploy/config.worker.yaml`) | Subsplash dashboard → create a Podcast whose content source is the media series/list your service recordings land in, then copy its RSS URL. Not a secret -- it's a public feed. See "Audio source: Subsplash podcast feed" below |
 | AWS account + admin/root access (one-time) | To create the deployer IAM user | You, once | Your own AWS account |
-| `SES_SENDER_ADDRESS` | Email address the article gets sent **from** | Notifier Lambda | Any address you control -- must be verified in SES (`aws ses verify-email-identity`) |
+| `SES_SENDER_ADDRESS` | Email address the article gets sent **from** | Notifier Lambda | Any address you control -- must be verified in SES (`aws ses verify-email-identity`); verify its domain with DKIM too so Gmail doesn't flag the emails (Step 3) |
 | `NOTIFY_RECIPIENT_ADDRESS` | Email address the article gets sent **to** | Notifier Lambda | Your inbox. Must *also* be verified if your SES account is still in the sandbox (new AWS accounts default to sandbox mode, which only allows sending to verified addresses) |
 | `ARTIFACTS_BUCKET` | S3 bucket name for output artifacts **and** app code (`app/` prefix, synced at worker boot) | `setup.sh` | Any globally-unique name you choose |
 | `SUBNET_ID` | A VPC subnet with internet egress (NAT or public + auto-assign IP) | `setup.sh`, Poller Lambda | An existing subnet in your AWS account |
@@ -255,7 +282,9 @@ Subsplash audio source),
 `sermon_extraction.*` (how much of the stream is "the sermon" vs.
 announcements/worship), `llm.*` (`max_tokens`, `thinking_effort`, style
 guide path, local-model path). See `config.yaml.example` for the full set
-with defaults.
+with defaults. A few more are environment variables: `MIN_SERMON_WORDS`
+(worker; default 400), `WHISPER_CPU_THREADS` (worker; see "Spot vs
+on-demand"), `NOTIFY_TIMEZONE` (notifier; see "Notification emails").
 
 **What's deliberately never a secret on disk:** `config.yaml` has no
 `api_key` field at all -- only environment variables at runtime, fetched
@@ -290,6 +319,8 @@ Poller Lambda ──reads──> Secrets Manager (YOUTUBE_API_KEY)
         │  (never search.list -- 100x the quota cost for the same check)
         ▼
 DynamoDB (EchoPulpitJobs): claim newly-ended video, or retry/reclaim stale jobs
+        │  (older sermons can also be queued straight from the Subsplash
+        │   feed -- scripts/queue_feed_episodes.py)
         ▼
 EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         │  bootstrap.sh (EC2 user-data, on boot):
@@ -298,16 +329,17 @@ EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         │   3. sync app code from S3, install deps into the venv
         │   4. fetch ANTHROPIC_API_KEY (required) and yt-dlp cookies
         │      (optional, see below) from Secrets Manager
-        │   5. run sermon_pipeline.py for that one video (captions-first,
-        │      falls back to Whisper on audio from the Subsplash feed if
-        │      configured, else YouTube; Claude writes the article)
+        │   5. run sermon_pipeline.py for that one video: YouTube captions
+        │      if available, else Whisper on audio from the Subsplash feed
+        │      (if configured) or YouTube; refuse near-empty transcripts;
+        │      Claude writes the article; scripture checked against KJV
         │   6. upload artifacts + this boot log to S3
         │   7. record COMPLETE/FAILED in DynamoDB
         │   8. terminate self (+ boot-time watchdog force-terminates at
         │      +3h regardless, as a cost backstop)
         ▼
 DynamoDB Streams ──triggers──> Notifier Lambda ──SES──> your inbox
-                                (PDF attached; failure alerts too)
+                     (PDF + Markdown + sermon transcript; failure alerts too)
 ```
 
 Nothing runs, and nothing costs money, between sermons. No custom AMI (a
@@ -317,10 +349,12 @@ itself is small enough that installing it at boot costs a few seconds, and
 there's no local model to bake in since article generation is
 Claude-primary. Rough cost at weekly-sermon cadence: Lambda + DynamoDB + S3
 + SES are all effectively free at this volume; the real line items are
-Claude API usage per article and a CPU instance for ~5-40 minutes per
-sermon (`m7g.xlarge` on-demand by default, AWS Graviton/arm64 -- see "Spot
-vs on-demand" below) -- well under $5/month total, versus $100+/month for a
-24/7 container.
+Claude API usage per article and a CPU instance per sermon (`m7g.xlarge` by
+default, AWS Graviton/arm64 -- see "Spot vs on-demand" below). A job takes
+about 1 minute of setup, Whisper transcription at roughly 0.4x the audio's
+length (~15 minutes for a 35-minute service, ~35 for a 90-minute one), and
+2-3 minutes for Claude -- around 10 cents of compute per sermon. Well under
+$5/month total at weekly cadence, versus $100+/month for a 24/7 container.
 
 ### Supporting infrastructure
 
@@ -371,9 +405,19 @@ on it live).
 
 `WORKER_INSTANCE_TYPE` defaults to `m7g.xlarge` (AWS Graviton/arm64 --
 ~15% cheaper on-demand than the equivalent Intel instance for the same
-CPU/memory); a smaller/cheaper type is workable too since the common path
-(captions available) does no local transcription or model inference at
-all -- size for the occasional Whisper-fallback case, not the common case.
+CPU/memory). Size it for Whisper: YouTube usually blocks caption fetches
+from AWS, and Subsplash audio always goes through Whisper, so local
+transcription is the common path, not the exception.
+
+Bigger isn't automatically faster. Measured on Graviton3 (15-minute sermon
+clip, Whisper `medium`/int8): 4 threads on 4 vCPUs ran at 0.39x realtime;
+6 or 8 threads on an 8-vCPU `c7g.2xlarge` were no faster (0.42x); 8 threads
+on a 16-vCPU `c7g.4xlarge` were 1.7x faster (0.23x); and all 16 threads on
+that same box were back to 0.42x. So a `4xlarge` roughly halves
+transcription time at about twice the cost per sermon, and a `2xlarge`
+buys nothing. The pipeline picks the thread count accordingly (all cores up
+to 8 vCPUs, half of them above that); set `WHISPER_CPU_THREADS` to
+override.
 `bootstrap.sh` fetches the matching-architecture ffmpeg build automatically
 (see its `ARCH` detection), so switching instance families between arm64
 and x86_64 needs no other changes; set `WORKER_ARCH=x86_64` in `setup.sh`
@@ -439,10 +483,18 @@ usable captions exist. Controlled by `transcription.prefer_captions` /
 `min_caption_coverage` / `caption_langs` in `config.yaml`, or
 `FORCE_WHISPER=true` to bypass captions for a specific run.
 
-Caveat: YouTube's archived-livestream auto-captions typically take 2-24
-hours to become available after the stream ends, so same-day processing
-will usually still fall back to Whisper -- captions mainly pay off if a
-video is reprocessed later (`FORCE_REPROCESS=true` with `VIDEO_ID` set).
+Caveats: YouTube's archived-livestream auto-captions typically take 2-24
+hours to become available after the stream ends, and YouTube often blocks
+the caption fetch from AWS entirely ("Sign in to confirm you're not a
+bot"). In practice most jobs fall back to Whisper -- captions mainly pay
+off if a video is reprocessed later (`FORCE_REPROCESS=true` with `VIDEO_ID`
+set). Jobs queued from the Subsplash feed skip captions altogether.
+
+**Near-empty transcripts are refused.** If the extracted sermon has fewer
+than `MIN_SERMON_WORDS` (default 400) words -- an aborted or silent stream,
+or failed transcription -- the job fails instead of generating an article.
+Given almost no input, the model will otherwise write a whole sermon
+anyway, with an invented preacher, date and text.
 
 ### Audio source: Subsplash podcast feed (optional)
 
@@ -578,6 +630,20 @@ you filter by kind:
   default; set `NOTIFY_TIMEZONE` (any IANA zone, e.g. `America/New_York`)
   before running `setup.sh` to change it.
 
+### Maintenance scripts
+
+| Script | What it does |
+|---|---|
+| `deploy/verify.sh --pre` / `--post` | Read-only preflight / health check of every AWS resource |
+| `deploy/requeue-failed.sh` | Put `FAILED` jobs back in the queue once the cause is fixed (dry run by default; `--cookies`, `--force`, specific IDs) |
+| `deploy/seed-ffmpeg-mirror.sh` | One-time seed of the S3 ffmpeg mirror |
+| `scripts/queue_feed_episodes.py --top N` | Queue the first N Subsplash feed episodes as jobs (dry run by default) |
+| `scripts/reverify_scripture.py VIDEO_ID...` | Apply KJV verification to articles generated while `data/kjv.json` was missing, rebuild their outputs, and re-send the email (dry run by default; no Claude calls) |
+| `scripts/build_kjv.py` | Rebuild `data/kjv.json` from the public-domain source, refusing anything incomplete |
+
+The Python scripts use your local AWS credentials; run them from the repo
+root after `pip install -r requirements.txt`.
+
 ---
 
 ## Troubleshooting
@@ -603,6 +669,17 @@ missing or misconfigured, before you go digging through the console.
   IDs to requeue only those, and `--force` if you fixed something other
   than cookies (it otherwise refuses when the cookies haven't changed since
   the last failure).
+- **A job failed with "Sermon transcript has only N words".** The
+  recording was silent, aborted, or mostly music, so no article was
+  written -- by design (see "Near-empty transcripts are refused"). Nothing
+  to fix unless the recording itself is wrong.
+- **Articles say "Scripture citations were NOT independently verified".**
+  `data/kjv.json` wasn't on the worker. Make sure it's synced to
+  `s3://<bucket>/app/data/kjv.json`, then fix already-sent articles with
+  `scripts/reverify_scripture.py`.
+- **Gmail warns "couldn't verify" on EchoPulpit emails.** The sender's
+  domain isn't DKIM-verified in SES -- see the recommended domain step in
+  Step 3.
 - **No email arrived for a completed job.** Check SES is out of sandbox
   mode, or that both sender and recipient addresses are verified (Step 3
   above) -- sandboxed SES silently refuses to send to unverified addresses.

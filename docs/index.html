@@ -3,7 +3,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EchoPulpit</title>
-<meta name="description" content="Turns a church's YouTube livestream into a finished, SEO-ready article -- transcribed, written, and scripture-checked automatically, with nothing running between sermons.">
+<meta name="description" content="Turns a church's YouTube livestream (or Subsplash recording) into a finished, SEO-ready article -- transcribed, written, and scripture-checked automatically, with nothing running between sermons.">
 <style>
   @font-face {
     font-family: 'Fraunces';
@@ -413,9 +413,9 @@
       <h1>A sermon becomes <em>a page</em>, on its own.</h1>
       <p class="hero-sub">
         EchoPulpit turns a church's YouTube livestream into a finished,
-        SEO-ready article the moment the stream ends &mdash; transcribed,
-        written in the pastor's own voice, and scripture-checked, with a
-        PDF in your inbox before you've finished your coffee.
+        SEO-ready article as soon as the stream ends &mdash; transcribed,
+        written in the pastor's own voice, and scripture-checked, with the
+        PDF in your inbox before Sunday lunch is over.
       </p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="https://github.com/sickmeyer/EchoPulpit">
@@ -426,7 +426,7 @@
       </div>
       <div class="hero-meta">
         <span><strong>$0</strong> between sermons</span>
-        <span><strong>~5&ndash;40 min</strong> per article</span>
+        <span><strong>~20&ndash;40 min</strong> per article</span>
         <span><strong>MIT</strong> licensed</span>
         <span>Built on <strong>Claude</strong></span>
       </div>
@@ -447,7 +447,7 @@
         <div class="step">
           <div class="step-num"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h2.5l2-6 3 12 2.5-9 1.5 3H20"/></svg></div>
           <h3>Stream ends</h3>
-          <p>Your church's livestream wraps on YouTube, same as always.</p>
+          <p>Your church's livestream wraps on YouTube (or Subsplash), same as always.</p>
         </div>
         <div class="step">
           <div class="step-num"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></div>
@@ -526,8 +526,8 @@
           <li>
             <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V6a2 2 0 0 1 2-2h9l5 5v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M14 4v5h5"/></svg></div>
             <div class="feature-text">
-              <h4>Captions first, Whisper as fallback</h4>
-              <p>Uses YouTube's own transcript when it's usable &mdash; only falls back to speech-to-text when it has to.</p>
+              <h4>Captions when they exist, Whisper when they don't</h4>
+              <p>Uses YouTube's own transcript when it's available and usable, and transcribes the audio itself otherwise.</p>
             </div>
           </li>
           <li>
@@ -555,7 +555,14 @@
             <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></div>
             <div class="feature-text">
               <h4>Ready to publish, not just a draft</h4>
-              <p>Markdown with SEO frontmatter and a formatted PDF land in your inbox &mdash; sensitive material is flagged for review, never silently softened.</p>
+              <p>Markdown with SEO frontmatter, a formatted PDF, and the sermon transcript land in your inbox &mdash; sensitive material is flagged for review, never silently softened.</p>
+            </div>
+          </li>
+          <li>
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></div>
+            <div class="feature-text">
+              <h4>Never fills in a missing sermon</h4>
+              <p>If a recording is silent or cut short, the job stops and tells you &mdash; no article gets written from a gap.</p>
             </div>
           </li>
         </ul>
