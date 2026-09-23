@@ -580,14 +580,21 @@ editable by the pastor himself, not prompt-engineering jargon. Missing or
 empty is fine -- generation still works from the system prompt's own voice
 guidance, just less calibrated to one specific preacher.
 
-**`claude-sonnet-5` reasons by default, and thinking tokens count against
-`max_tokens`.** Confirmed the hard way in production: an `max_tokens: 8000`
-budget got consumed almost entirely by thinking (7999 tokens), leaving
-nothing for the actual article and producing a silently empty response.
-`ClaudeBackend` sends `thinking={"type": "adaptive"}` +
-`output_config={"effort": llm.thinking_effort}` (this model rejects the
-older `thinking.type=enabled`/`budget_tokens` scheme with a 400) and keeps
-`max_tokens` generous regardless, as a cheap safety ceiling.
+**Model: `claude-opus-5-5`** (`llm.claude_model`, or `CLAUDE_MODEL`),
+chosen over `claude-sonnet-5` after a blind side-by-side; it costs about
+4x as much per article (~$0.35-0.70 vs ~$0.14).
+
+**Thinking tokens count against the output ceiling.** `ClaudeBackend`
+sends `thinking={"type": "adaptive"}` + `output_config={"effort":
+llm.thinking_effort}` (`budget_tokens` is rejected with a 400). Opus 5.5
+thinks far more than Sonnet 5: with a 16,000 ceiling it spent the whole
+budget on thinking for 2 of 3 test sermons and produced no article text.
+So every Claude call -- including the repair/regenerate passes -- uses
+`llm.claude_max_tokens` (48,000), and requests are streamed, which
+budgets that large require. Billing is by tokens actually generated, so
+the ceiling itself costs nothing. A safety-classifier decline
+(`stop_reason: "refusal"`) is logged and handled like any other empty
+generation, so the job fails with an alert instead of shipping nothing.
 
 ### Output
 

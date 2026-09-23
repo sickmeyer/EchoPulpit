@@ -678,33 +678,45 @@ class ClaudeBackend:
         self.model = model
 
     def chat(self, messages: List[Dict[str, str]], cfg: Dict[str, Any]) -> str:
-        # This model (claude-sonnet-5) rejects both `temperature` and
-        # `top_p` as deprecated request parameters -- neither is sent.
-        # cfg["temperature"]/cfg["top_p"] are still read by the local-Llama
-        # path; they're simply not meaningful here.
-        max_tokens = int(cfg.get("max_tokens", 1400))
-
-        # claude-sonnet-5 reasons by default, and thinking tokens count
-        # against max_tokens -- confirmed by production logs where thinking
-        # consumed 7999 of an 8000 max_tokens budget, leaving ~0 tokens for
-        # the actual article and producing an empty response. This model
-        # doesn't support the older thinking.type=enabled/budget_tokens
-        # scheme (confirmed via a live 400 from the API); it uses
-        # thinking.type=adaptive plus output_config.effort instead. "medium"
-        # balances article quality against leaving real room for output.
+        # Current Claude models reject `temperature` / `top_p`, so neither is
+        # sent; cfg["temperature"]/cfg["top_p"] are only read by the
+        # local-Llama path.
+        #
+        # Thinking tokens count against max_tokens. claude-opus-5-5 thinks
+        # far more than claude-sonnet-5 at the same effort: in a 2026-09-23
+        # comparison it spent the entire 16000-token budget on thinking for
+        # 2 of 3 sermons (no article text at all), and finished cleanly with
+        # 25-31K output tokens once given 48000. So Claude calls always use
+        # the `claude_max_tokens` ceiling (billing is by tokens actually
+        # generated, so a high ceiling costs nothing extra) -- including the
+        # repair/regenerate passes, whose small max_tokens overrides exist
+        # for the local model. Budgets this size must be streamed to stay
+        # under the SDK's HTTP timeout.
+        max_tokens = int(cfg.get("claude_max_tokens") or cfg.get("max_tokens", 1400))
+        # Adaptive thinking + output_config.effort (budget_tokens is rejected
+        # with a 400 on these models). Set explicitly: Opus 5.5's default is
+        # "medium", Sonnet 5's "high".
         thinking_effort = cfg.get("thinking_effort", "medium")
 
         system_parts = [m["content"] for m in messages if m["role"] == "system"]
         chat_messages = [m for m in messages if m["role"] != "system"]
 
-        resp = self.client.messages.create(
+        with self.client.messages.stream(
             model=self.model,
             system="\n\n".join(system_parts),
             messages=chat_messages,
             max_tokens=max_tokens,
             thinking={"type": "adaptive"},
             output_config={"effort": thinking_effort},
-        )
+        ) as stream:
+            resp = stream.get_final_message()
+        if resp.stop_reason == "refusal":
+            # Safety classifiers can decline (HTTP 200, no article text).
+            # Returning "" sends it down the same empty-output path as any
+            # other failed generation, which ends in a FAILED job + alert.
+            details = getattr(resp, "stop_details", None)
+            print(f"[ClaudeBackend] Model declined the request: {details}")
+            return ""
         text = "".join(block.text for block in resp.content if block.type == "text").strip()
         if not text:
             block_types = [block.type for block in resp.content]
@@ -741,7 +753,7 @@ def build_backend(cfg: Dict[str, Any]):
     """
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if anthropic_key:
-        model = os.environ.get("CLAUDE_MODEL", cfg.get("claude_model", "claude-sonnet-5"))
+        model = os.environ.get("CLAUDE_MODEL", cfg.get("claude_model", "claude-opus-5-5"))
         print(f"[{utc_now_iso()}] ANTHROPIC_API_KEY set; using Claude ({model}) for article generation.")
         client = anthropic.Anthropic(api_key=anthropic_key)
         return ClaudeBackend(client, model)

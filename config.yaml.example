@@ -32,7 +32,7 @@ llm:
   # back to the local GGUF model below otherwise. On the local path, long
   # transcripts are chunked and summarized first to fit the model's context;
   # Claude's context window is large enough that this is skipped entirely.
-  claude_model: "claude-sonnet-5"   # or set env CLAUDE_MODEL
+  claude_model: "claude-opus-5-5"   # or set env CLAUDE_MODEL; claude-sonnet-5 is ~4x cheaper
   # Pastoral style guide (markdown, plain-language, editable by non-devs --
   # see prompts/style_guide.md) injected into the prompt. Missing/empty is
   # fine, degrades gracefully to just the system prompt's own voice guidance.
@@ -49,13 +49,12 @@ llm:
   # still, so this needs real headroom -- it's just a ceiling, no cost for
   # headroom not used.
   #
-  # claude-sonnet-5 reasons by default and thinking tokens count against
-  # max_tokens -- production logs showed thinking alone consuming 7999 of
-  # an 8000 budget, leaving nothing for the article itself. This model uses
-  # thinking.type=adaptive + output_config.effort (not the older
-  # enabled/budget_tokens scheme, which it rejects with a 400). max_tokens
-  # stays generous regardless, as a cheap safety ceiling.
-  max_tokens: 16000
+  max_tokens: 16000          # local model only
+  # Claude calls: thinking tokens count against this ceiling, and Opus 5.5
+  # needed 25-31K output tokens per article at medium effort (16K left
+  # some articles with no text at all). Requests are streamed; billing is
+  # by tokens actually used.
+  claude_max_tokens: 48000
   thinking_effort: "medium"
 
 output:
