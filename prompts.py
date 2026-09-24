@@ -219,13 +219,21 @@ characters), focus_keyword, keywords (terms Spanish speakers actually
 search for), and alternate_titles. The slug uses Spanish words but plain
 ASCII: lowercase, hyphens, no accents or ñ (e.g. "santificado-sea-tu-nombre-mateo-6-9").
 
-Scripture: wherever the system prompt says KJV, use the Reina Valera Gómez
-(RVG) instead. Quote the RVG exactly -- its wording, spelling, accents and
-punctuation. Cite with Spanish book names, e.g. (Juan 3:16),
+Scripture: wherever the system prompt says KJV, use the Reina-Valera 1960
+(RVR1960) instead -- the Bible this congregation reads. Quote the RVR1960
+exactly -- its wording, spelling, accents and punctuation. Cite with Spanish book names, e.g. (Juan 3:16),
 (1 Corintios 13:4-7), (Salmos 23:1), (Apocalipsis 3:20), in the same
 blockquote format with straight double quotes:
 > "Porque de tal manera amó Dios al mundo, ..." (Juan 3:16)
 primary_passage and scripture_references use the same Spanish names.
+
+The RVR1960 is copyrighted, and the Bible Societies allow quoting it only
+while the quotations stay under 25% of the article. Keep blockquoted
+scripture to well under a fifth of the article's words: quote the key
+passage and the verses the message turns on in full, and for the rest give
+the reference with a short paraphrase or a phrase in quotation marks
+instead of a full blockquote. This overrides "every reference is spelled
+out in full" for Spanish articles.
 
 Cultural tact: the congregation is Hispanic and from many countries. Keep
 the truth plain, even when it confronts, but with respect and warmth --

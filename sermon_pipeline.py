@@ -936,6 +936,19 @@ def flag_text(flag: str) -> str:
     return _FLAG_TAG_RE.sub("", str(flag), count=1) if flag_category(flag) in FLAG_CATEGORIES else str(flag)
 
 
+# Bibles quoted under a copyright permission that caps quotations as a
+# share of the work (RVR1960: under 25%). Flag with some margin.
+QUOTE_SHARE_LIMITS = {"es": 0.20}
+
+
+def scripture_quote_share(markdown_body: str) -> float:
+    """Share of the article's words that sit in blockquotes (scripture)."""
+    lines = markdown_body.splitlines()
+    total = sum(len(line.split()) for line in lines)
+    quoted = sum(len(line.lstrip(">").split()) for line in lines if line.lstrip().startswith(">"))
+    return quoted / total if total else 0.0
+
+
 def compute_needs_review(flags: List[str]) -> bool:
     return any(flag_category(f) in REVIEW_FLAG_CATEGORIES for f in flags)
 
@@ -1110,6 +1123,14 @@ def llm_generate_article(
                 frontmatter["preacher"] = service["preacher"]
             if service.get("date"):
                 frontmatter["preached_on"] = service["date"]
+        share = scripture_quote_share(frontmatter["article_markdown"])
+        limit = QUOTE_SHARE_LIMITS.get(language)
+        if limit and share > limit:
+            frontmatter["reviewer_notes"]["flags"] = frontmatter["reviewer_notes"]["flags"] + [
+                f"[scripture] Quoted {BIBLES[language][1]} text is {share:.0%} of the article. "
+                "Its copyright permission requires quotations under 25% of the work; "
+                "trim or paraphrase some blockquotes before publishing."
+            ]
         frontmatter["needs_review"] = compute_needs_review(frontmatter["reviewer_notes"]["flags"])
         frontmatter["language"] = language
         return frontmatter

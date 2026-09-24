@@ -47,6 +47,8 @@ PUBLISH_URL = os.environ.get("PUBLISH_URL", "")
 
 
 def _recipients(language: str) -> list:
+    """Article-email recipients: you, plus that language's extra reviewers.
+    Failure alerts go to NOTIFY_RECIPIENT_ADDRESS only (_send_failed_email)."""
     extra = os.environ.get(f"NOTIFY_EXTRA_RECIPIENTS_{(language or 'en').upper()}", "")
     out = [RECIPIENT]
     for addr in (a.strip() for a in extra.split(",")):

@@ -6,7 +6,10 @@ import pytest
 import sermon_pipeline as sp
 from prompts import LANGUAGE_INSTRUCTIONS
 from scripture_lookup import (
+    RV1960_PATH,
+    RVG_PATH,
     bible_available,
+    load_bible,
     canonical_reference_string,
     lookup_verse_text,
     normalize_reference,
@@ -58,11 +61,26 @@ def test_verify_spanish_corrects_and_keeps_spanish_names():
     assert '> "Jehová es mi pastor; nada me faltará." (Salmos 23:1)' in out
     assert "Juan 99:1" not in out
     assert refs == ["Juan 3:16", "Salmos 23:1"]
-    assert len(flags) == 1 and "Reina Valera Gómez" in flags[0]
+    assert len(flags) == 1 and "Reina-Valera 1960" in flags[0]
 
 
 def test_rvg_dataset_bundled():
-    assert bible_available("es") and bible_available("en")
+    assert os.path.exists(RVG_PATH) and bible_available("en")
+
+
+@pytest.mark.skipif(not os.path.exists(RV1960_PATH), reason="data/rv1960.json is git-ignored; build it with scripts/build_rv1960.py")
+def test_rv1960_dataset():
+    assert bible_available("es")
+    bible = load_bible("es")
+    assert "muestra su amor" in bible["Romans 5:8"]
+    assert bible["Genesis 33:20"].startswith("Y erigió allí un altar")
+    assert "Psalms 47:10" not in bible
+
+
+def test_quote_share():
+    body = "> " + "palabra " * 20 + "(Juan 3:16)" + chr(10) * 2 + "texto " * 79
+    assert 0.2 < sp.scripture_quote_share(body) < 0.22
+    assert sp.scripture_quote_share("sin citas") == 0.0
 
 
 # ---- language plumbing ----
@@ -96,7 +114,7 @@ def test_default_preacher_for_spanish_only():
 
 def test_spanish_prompt_block():
     block = LANGUAGE_INSTRUCTIONS["es"]
-    assert "Reina Valera Gómez" in block and "English" in block and "Adaptado de un mensaje" in block
+    assert "Reina-Valera 1960" in block and "25%" in block and "English" in block and "Adaptado de un mensaje" in block
     assert LANGUAGE_INSTRUCTIONS["en"] == ""
 
 

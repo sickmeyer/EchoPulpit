@@ -193,7 +193,7 @@ def lambda_handler(event, context):
     for video in ended:
         video_id = video["id"]
         title = video["snippet"]["title"]
-        # Spanish services get Spanish articles (Whisper "es", RVG scripture);
+        # Spanish services get Spanish articles (Whisper "es", RVR1960 scripture);
         # the worker reads the language from its SermonLanguage tag.
         language = "es" if _is_spanish(video) else "en"
         end_time = video["liveStreamingDetails"]["actualEndTime"]

@@ -9,7 +9,7 @@ email carries a **Review & publish** button that commits the article to
 your blog once you've approved it.
 
 English and Spanish services are both supported: a Spanish service gets a
-Spanish article, with scripture checked against the Reina Valera Gómez
+Spanish article, with scripture checked against the Reina-Valera 1960
 instead of the KJV -- see "Spanish services" below.
 
 If your church streams through **Subsplash** (which restreams to YouTube),
@@ -339,7 +339,7 @@ EC2 instance (stock Amazon Linux 2023 AMI, tagged SermonVideoId=<id>)
         │      if available, else Whisper on audio from the Subsplash feed
         │      (if configured) or YouTube; refuse near-empty transcripts;
         │      Claude writes the article; scripture checked against KJV
-        │      (Reina Valera Gómez for Spanish services)
+        │      (Reina-Valera 1960 for Spanish services)
         │   6. upload artifacts + this boot log to S3
         │   7. record COMPLETE/FAILED in DynamoDB
         │   8. terminate self (+ boot-time watchdog force-terminates at
@@ -618,12 +618,21 @@ from `languages.es` in the config:
 - the article is written in Spanish with `prompts/style_guide_es.md`
   (written as from a Spanish-speaking pastor, including a section on
   cultural tact), while `reviewer_notes` stay in English;
-- scripture is quoted from and verified against the Reina Valera Gómez
-  (`data/rvg.json`, built by `scripts/build_rvg.py` from eBible.org; the
-  copyright notice is in `data/RVG-NOTICE.txt`);
+- scripture is quoted from and verified against the Reina-Valera 1960, the
+  Bible the Spanish service preaches from (`data/rv1960.json`, built by
+  `scripts/build_rv1960.py`). The RVR1960 is copyrighted, so that file is
+  **git-ignored and must never be committed**: build it locally and upload
+  it to the private artifacts bucket (`app/data/rv1960.json`) only. Articles
+  quote it under the Bible Societies' standard permission (up to 500
+  verses, under 25% of the work, with their credit line on the blog), so
+  Spanish articles quote key verses in full and paraphrase the rest, and an
+  article whose blockquoted scripture passes 20% is flagged for review.
+  (The freely redistributable Reina Valera Gómez, `data/rvg.json` from
+  `scripts/build_rvg.py`, is kept as an alternative);
 - the preacher defaults to `default_preacher` when the feed doesn't name one;
-- the notification also goes to `NOTIFY_EXTRA_RECIPIENTS_ES` (comma-separated,
-  set on the notifier by `setup_publisher.py` from the same env var);
+- the article email also goes to `NOTIFY_EXTRA_RECIPIENTS_ES` (comma-separated,
+  set on the notifier by `setup_publisher.py` from the same env var); failure
+  alerts go only to `NOTIFY_RECIPIENT_ADDRESS`;
 - published posts get `lang: es` and appear under the blog's `/es/` section.
 
 To backfill a Spanish service from the Subsplash feed:
@@ -685,7 +694,7 @@ model) decides whether an article needs review:
 | Tag | Means | Marks "Review needed"? |
 |---|---|---|
 | `[editorial]` | A judgment call to agree with: political/cultural material, named individuals, sensitive pastoral subjects, other named churches or denominations | Yes |
-| `[scripture]` | Citation ambiguity, or a quotation the Bible check (KJV, or RVG for Spanish) removed | Yes |
+| `[scripture]` | Citation ambiguity, or a quotation the Bible check (KJV, or RVR1960 for Spanish) removed | Yes |
 | `[transcript]` | The transcript is incomplete; says how the gap was handled | No -- informational |
 | `[attribution]` | Preacher or date couldn't be confirmed | No -- informational |
 
@@ -740,6 +749,7 @@ delete its file from the blog repo.
 | `scripts/queue_feed_episodes.py --top N` or `--date YYYY-MM-DD [--title TEXT]` | Queue Subsplash feed episodes as jobs: the first N, or those from one service date (optionally only titles containing TEXT). The language is detected from the title (`--language` overrides). Dry run by default; `--apply` to queue |
 | `scripts/reverify_scripture.py VIDEO_ID...` | (English articles) Apply KJV verification to articles generated while `data/kjv.json` was missing, rebuild their outputs, and re-send the email (dry run by default; no Claude calls) |
 | `scripts/build_kjv.py` | Rebuild `data/kjv.json` from the public-domain source, refusing anything incomplete |
+| `scripts/build_rv1960.py` | Build `data/rv1960.json` (Reina-Valera 1960, git-ignored) and check it's complete and really the 1960; then upload it to `s3://<bucket>/app/data/` |
 | `scripts/build_rvg.py` | Rebuild `data/rvg.json` (Reina Valera Gómez) from eBible.org, refusing anything incomplete |
 
 The Python scripts use your local AWS credentials; run them from the repo

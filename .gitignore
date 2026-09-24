@@ -15,3 +15,7 @@ __pycache__/
 deploy/.build/
 *.pkr.hcl.bak
 
+
+# RVR1960 full text is copyrighted: build it locally (scripts/build_rv1960.py)
+# and upload it to the private artifacts bucket only. Never commit it.
+data/rv1960.json

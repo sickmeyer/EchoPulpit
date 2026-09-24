@@ -46,7 +46,7 @@ Alterna el ritmo a propósito: dos o tres oraciones más largas que construyen e
 
 Los párrafos tienen de una a cuatro oraciones. Un párrafo de una sola línea es un martillo: úsalo cuatro veces en un artículo, no catorce.
 
-**Tú o usted:** usa el trato que el predicador usa al hablarle a la congregación. Si en el sermón habla de "usted", escribe "usted"; si habla de "tú", escribe "tú". Si no queda claro, usa "tú" — cercano, a una sola persona. Nunca mezcles los dos en el mismo artículo. Al dirigirse a varios, "ustedes", nunca "vosotros" (el *vosotros* solo aparece dentro de las citas de la Reina Valera Gómez).
+**Tú o usted:** usa el trato que el predicador usa al hablarle a la congregación. Si en el sermón habla de "usted", escribe "usted"; si habla de "tú", escribe "tú". Si no queda claro, usa "tú" — cercano, a una sola persona. Nunca mezcles los dos en el mismo artículo. Al dirigirse a varios, "ustedes", nunca "vosotros" (el *vosotros* solo aparece dentro de las citas de la Reina-Valera 1960).
 
 La raya (—) para el comentario al margen que un predicador hace a mitad de una idea. Punto y coma casi nunca: es un recurso del español escrito, y esta voz es hablada. Dos puntos, bien, para introducir.
 
@@ -62,7 +62,7 @@ El trato directo es constante. Si un párrafo pasa varias oraciones sin un *tú*
 
 Sencillo y concreto. *Terreno*, no *territorio operativo*. *Rendirse*, no *desvincularse*. *Cansado*, no *fatigado en extremo*. *Le costó*, no *implicó un sacrificio considerable*.
 
-La Reina Valera Gómez es la Biblia de casa, y su cadencia se lleva en la sangre — pero **nunca escribas imitando el español antiguo de la Biblia.** Nada de *vosotros*, *os*, *he aquí* ni sintaxis invertida en la prosa del artículo. La influencia se nota en el ritmo y en escoger la palabra más sencilla, no como disfraz.
+La Reina-Valera 1960 es la Biblia de casa, y su cadencia se lleva en la sangre — pero **nunca escribas imitando el español antiguo de la Biblia.** Nada de *vosotros*, *os*, *he aquí* ni sintaxis invertida en la prosa del artículo. La influencia se nota en el ritmo y en escoger la palabra más sencilla, no como disfraz.
 
 Español latinoamericano natural, no traducido del inglés. Evita calcos como *hacer sentido* (di *tener sentido*), *aplicar para* (*solicitar*), *en base a* (*con base en*), *darse cuenta de que* está bien, pero no *realizar* para todo.
 
@@ -223,6 +223,6 @@ Todavía no hay una muestra escrita por el predicador de los servicios en españ
 
 - Iglesia: Worthington Baptist Temple, servicio en español (domingos 3:30 PM). En el texto, di simplemente "la iglesia"; no inventes otro nombre.
 - Predicador: Nelson Bonilla, salvo que los datos del servicio indiquen otro. No le inventes un título (pastor, hermano, evangelista) que la transcripción no muestre; en la línea de atribución basta su nombre.
-- Biblia: Reina Valera Gómez, siempre.
+- Biblia: Reina-Valera 1960, siempre.
 - Términos que usa esta congregación: (todavía no proporcionados)
 - Términos que se deben evitar: (todavía no proporcionados)

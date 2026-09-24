@@ -7,10 +7,15 @@ import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 KJV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "kjv.json")
-# Reina Valera Gómez, for Spanish articles -- same "Book C:V" keys (English
-# canonical book names) as kjv.json; see scripts/build_rvg.py.
+# Reina-Valera 1960, for Spanish articles (the Bible the Spanish service
+# preaches from) -- same "Book C:V" keys (English canonical book names) as
+# kjv.json; see scripts/build_rv1960.py. Copyrighted: git-ignored, built
+# locally and synced to the worker from the private artifacts bucket only.
+RV1960_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rv1960.json")
+# Reina Valera Gómez (freely redistributable; scripts/build_rvg.py) -- kept
+# as an alternative Spanish text, not currently used.
 RVG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rvg.json")
-BIBLES = {"en": (KJV_PATH, "KJV"), "es": (RVG_PATH, "Reina Valera Gómez")}
+BIBLES = {"en": (KJV_PATH, "KJV"), "es": (RV1960_PATH, "Reina-Valera 1960")}
 
 # The 66 canonical book names as they appear as keys in data/kjv.json
 # (straight from the source dataset's own "book" field). Used to
