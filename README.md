@@ -662,6 +662,7 @@ you filter by kind:
 ```
 [EchoPulpit] Article ready: Sunday Main Worship — Sep 20, 2026
 [EchoPulpit] Review needed: Midweek Worship Service — Sep 17, 2026
+[EchoPulpit] Published: Sunday Main Worship — Sep 20, 2026
 [EchoPulpit] Failed (attempt 2): Weekly Bible Hour — Sep 13, 2026
 [EchoPulpit] Monthly report: August 2026
 ```
@@ -678,6 +679,9 @@ you filter by kind:
   `focus_keyword`, `keywords`) and in `article.html` as `<meta
   name="description">`, `<meta name="keywords">`, `author`, and Open Graph
   / Twitter tags.
+- **Published** -- sent once, the moment a "Review & publish" click actually
+  lands the post on the blog (not on retries). Carries a **Modify** button
+  to a long-lived management page -- see "Manage a published post" below.
 - **Failed (attempt N)** -- sent on each failed attempt; a job gets 3
   attempts before it's left `FAILED` (see Troubleshooting).
 - The date is the service's local date (from the stream's end time), which
@@ -710,7 +714,9 @@ Every completion email carries a **Review & publish** button (a signed
 link, valid 30 days, that only works for that one article). It opens a
 page served by the `echopulpit-publisher` Lambda showing the article, its
 decisions and informational notes, the corrections made, and editable
-preacher and service-date fields. Publishing:
+title, preacher, and service-date fields -- editing the title updates the
+URL slug to match (unless you leave it as-is, in which case the pipeline's
+original slug is kept). Publishing:
 
 - requires ticking "I've read the decisions above and accept them" when
   the article needs review (the acceptance and the flags accepted are
@@ -736,8 +742,33 @@ Publishing also needs a GitHub fine-grained token with access to only the
 blog repo and **Contents: Read and write**, which you store yourself:
 `aws secretsmanager create-secret --name echopulpit/github-token
 --secret-string "github_pat_..."`. Until it exists, the review page works
-but Publish reports an error and publishes nothing. To take a post down,
-delete its file from the blog repo.
+but Publish reports an error and publishes nothing.
+
+### Manage a published post
+
+Once an article is published, its link (and the fresh one in the
+**Published** email's **Modify** button, valid 5 years -- long enough to
+still work whenever you'd actually need it, since there's no partial
+revocation short of rotating the signing key) turns into a management
+page instead of a dead end:
+
+- **Unpublish** adds `draft: true` to the post's frontmatter (a PUT through
+  the GitHub API, same as publishing) and the blog stops listing, linking,
+  or serving it after the next rebuild. The file and its git history stay
+  in the repo -- this hides the post, it doesn't erase it.
+- **Republish** brings up the same review step used for the original
+  publish, pre-filled with the post's current title/preacher/date, so you
+  can make minor edits before it goes back live -- no reviewer decisions to
+  re-accept there (the article content isn't regenerated) and, unlike an
+  initial publish, editing the title does **not** change the URL: the file
+  stays at its original path, only its frontmatter (title, preacher,
+  `pubDate`, and `draft`) is updated in place, so a link that's already out
+  in the world keeps working.
+- **Delete** removes the file from the repo outright (a GitHub delete
+  commit). It's off the live site after the next rebuild and off the
+  page you're looking at -- the link can't bring it back -- but it's still
+  recoverable from the blog repo's git history, since nothing here rewrites
+  history.
 
 ### Maintenance scripts
 

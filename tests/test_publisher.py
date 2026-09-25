@@ -78,6 +78,14 @@ def test_build_post_feed_job_has_no_video_and_omits_empty_preacher():
     assert "videoUrl" not in text and "preacher" not in text and "audioUrl" not in text
 
 
+def test_resolve_slug_keeps_pipeline_slug_when_title_unchanged():
+    assert pl.resolve_slug(ARTICLE, ARTICLE["title"]) == ARTICLE["slug"]
+
+
+def test_resolve_slug_regenerates_from_edited_title():
+    assert pl.resolve_slug(ARTICLE, "A Whole New Title!") == "a-whole-new-title"
+
+
 def test_needs_review_rules():
     assert pl.needs_review(ARTICLE) is False
     assert pl.needs_review({"reviewer_notes": {"flags": ["[editorial] politics"]}}) is True
@@ -110,27 +118,66 @@ class FakeTable:
         self.updates.append(kw)
         if kw.get("ConditionExpression") == "attribute_not_exists(published_at)" and "published_at" in self.job:
             raise self.meta.client.exceptions.ConditionalCheckFailedException()
-        if kw["UpdateExpression"].startswith("SET published_at"):
-            self.job["published_at"] = kw["ExpressionAttributeValues"][":t"]
-        elif kw["UpdateExpression"].startswith("REMOVE published_at"):
-            self.job.pop("published_at", None)
+        expr = kw["UpdateExpression"].strip()
+        values = kw.get("ExpressionAttributeValues", {})
+        if expr.startswith("SET "):
+            for clause in expr[4:].split(","):
+                field, _, val_ref = clause.strip().partition("=")
+                self.job[field.strip()] = values[val_ref.strip()]
+        elif expr.startswith("REMOVE "):
+            for field in expr[7:].split(","):
+                self.job.pop(field.strip(), None)
 
 
 @pytest.fixture
 def env(monkeypatch):
     table = FakeTable(JOB)
     commits = []
+    manage_calls = []
+    posts = {}  # path -> (text, sha), populated by the fake commit_post/update_post
     monkeypatch.setattr(pl, "_table", table)
     monkeypatch.setattr(pl, "_secret", lambda name: KEY.decode())
     monkeypatch.setattr(pl, "_load", lambda token: (table.get_item(Key={})["Item"], state["article"]))
     monkeypatch.setattr(pl, "feed_episode", lambda job: None)
-    monkeypatch.setattr(pl, "commit_post", lambda path, text, title: commits.append(path) or "https://github/commit")
-    state = {"article": dict(ARTICLE), "table": table, "commits": commits}
+
+    def fake_commit_post(path, text, title):
+        commits.append(path)
+        posts[path] = (text, "sha-1")
+        return "https://github/commit"
+
+    def fake_get_post(path):
+        return posts[path]
+
+    def fake_update_post(path, text, message, sha):
+        manage_calls.append(("update", path, message))
+        posts[path] = (text, "sha-2")
+        return "https://github/commit-update"
+
+    def fake_delete_post(path, message, sha):
+        manage_calls.append(("delete", path, message))
+        posts.pop(path, None)
+        return "https://github/commit-delete"
+
+    monkeypatch.setattr(pl, "commit_post", fake_commit_post)
+    monkeypatch.setattr(pl, "get_post", fake_get_post)
+    monkeypatch.setattr(pl, "update_post", fake_update_post)
+    monkeypatch.setattr(pl, "delete_post", fake_delete_post)
+    state = {"article": dict(ARTICLE), "table": table, "commits": commits, "manage_calls": manage_calls,
+             "posts": posts}
     return state
 
 
 def _post(fields):
+    fields = {"title": ARTICLE["title"], **fields}
     return {"requestContext": {"http": {"method": "POST"}}, "body": urllib.parse.urlencode(fields)}
+
+
+def _get(t="tok"):
+    return {"requestContext": {"http": {"method": "GET"}}, "queryStringParameters": {"t": t}}
+
+
+def _get_republish(t="tok"):
+    return {"requestContext": {"http": {"method": "GET"}}, "queryStringParameters": {"t": t, "republish": "1"}}
 
 
 def test_get_shows_review_page_and_never_publishes(env):
@@ -146,7 +193,7 @@ def test_post_publishes_once(env):
     assert "Published" in resp["body"]
     assert env["commits"] == ["src/content/posts/2026-09-13-faith-changes-things-romans-10.md"]
     again = pl.lambda_handler(_post({"t": "tok", "date": "2026-09-13"}), None)
-    assert "Already published" in again["body"]
+    assert "Manage:" in again["body"] and "Unpublish" in again["body"]
     assert len(env["commits"]) == 1
 
 
@@ -161,6 +208,130 @@ def test_post_requires_ack_when_review_needed(env):
 def test_post_rejects_bad_date(env):
     resp = pl.lambda_handler(_post({"t": "tok", "date": "not-a-date"}), None)
     assert "service date" in resp["body"] and env["commits"] == []
+
+
+def test_post_rejects_empty_title(env):
+    resp = pl.lambda_handler(_post({"t": "tok", "date": "2026-09-13", "title": ""}), None)
+    assert "enter a title" in resp["body"] and env["commits"] == []
+
+
+def test_editing_title_changes_slug_and_url(env):
+    resp = pl.lambda_handler(
+        _post({"t": "tok", "date": "2026-09-13", "title": "Faith That Confesses With the Mouth"}), None)
+    assert "Published" in resp["body"]
+    assert env["commits"] == ["src/content/posts/2026-09-13-faith-that-confesses-with-the-mouth.md"]
+    published_url_update = next(u for u in env["table"].updates if ":u" in u.get("ExpressionAttributeValues", {}))
+    assert published_url_update["ExpressionAttributeValues"][":u"] == \
+        "https://blog.example.org/posts/faith-that-confesses-with-the-mouth/"
+    assert published_url_update["ExpressionAttributeValues"][":ti"] == "Faith That Confesses With the Mouth"
+
+
+def _publish(env):
+    resp = pl.lambda_handler(_post({"t": "tok", "preacher": "Joseph", "date": "2026-09-13"}), None)
+    assert "Published" in resp["body"]
+    return env["table"].job["published_path"]
+
+
+def test_manage_page_shows_after_publish(env):
+    _publish(env)
+    resp = pl.lambda_handler(_get(), None)
+    assert resp["statusCode"] == 200
+    assert "Manage:" in resp["body"] and "Unpublish" in resp["body"] and "Delete" in resp["body"]
+    assert "Republish" not in resp["body"]
+
+
+def test_unpublish_sets_draft_and_offers_republish(env):
+    path = _publish(env)
+    resp = pl.lambda_handler(_post({"t": "tok", "action": "unpublish"}), None)
+    assert "Unpublished" in resp["body"] and "Republish" in resp["body"]
+    assert env["manage_calls"] == [("update", path, "Unpublish: Faith Changes Things")]
+    text, _ = env["posts"][path]
+    assert "draft: true" in text
+    # DynamoDB reflects it, and a fresh GET still shows the unpublished state.
+    assert env["table"].job["is_draft"] is True
+    again = pl.lambda_handler(_get(), None)
+    assert "Unpublished" in again["body"] and "Republish" in again["body"]
+
+
+def test_republish_click_shows_review_step_prefilled(env):
+    path = _publish(env)
+    pl.lambda_handler(_post({"t": "tok", "action": "unpublish"}), None)
+    resp = pl.lambda_handler(_get_republish(), None)
+    assert resp["statusCode"] == 200
+    assert "Republish" in resp["body"]
+    assert 'value="Faith Changes Things"' in resp["body"]  # pre-filled from published_title
+    assert 'value="Joseph"' in resp["body"]  # pre-filled from published_preacher
+    assert 'value="2026-09-13"' in resp["body"]  # pre-filled from published_date
+    # No reviewer decisions/ack to re-accept -- the content isn't being regenerated.
+    assert "Review needed" not in resp["body"] and "accept them" not in resp["body"]
+    # editing the title here must not offer to change the URL
+    assert "URL stays" in resp["body"]
+    assert env["manage_calls"] == [("update", path, "Unpublish: Faith Changes Things")]  # no extra calls yet
+
+
+def test_republish_with_edits_updates_content_but_not_url(env):
+    path = _publish(env)
+    pl.lambda_handler(_post({"t": "tok", "action": "unpublish"}), None)
+    resp = pl.lambda_handler(_post({"t": "tok", "republish": "1", "title": "Faith Changes Things (Revised)",
+                                    "preacher": "Nelson Bonilla", "date": "2026-09-14"}), None)
+    assert "Republished" in resp["body"] and "Unpublish" in resp["body"]
+    assert env["manage_calls"][-1] == ("update", path, "Republish: Faith Changes Things (Revised)")
+    text, _ = env["posts"][path]
+    assert "draft" not in text
+    assert "title: Faith Changes Things (Revised)" in text
+    assert "preacher: Nelson Bonilla" in text
+    assert "pubDate: '2026-09-14'" in text
+    assert "is_draft" not in env["table"].job
+    assert env["table"].job["published_title"] == "Faith Changes Things (Revised)"
+    assert env["table"].job["published_preacher"] == "Nelson Bonilla"
+    assert env["table"].job["published_date"] == "2026-09-14"
+    # the file path/URL never changed, even though the title did
+    assert env["table"].job["published_path"] == path
+
+
+def test_republish_without_edits_just_clears_draft(env):
+    path = _publish(env)
+    pl.lambda_handler(_post({"t": "tok", "action": "unpublish"}), None)
+    resp = pl.lambda_handler(_post({"t": "tok", "republish": "1", "date": "2026-09-13"}), None)
+    assert "Republished" in resp["body"]
+    text, _ = env["posts"][path]
+    assert "draft" not in text
+    assert "title: Faith Changes Things" in text
+
+
+def test_republish_rejects_empty_title(env):
+    _publish(env)
+    pl.lambda_handler(_post({"t": "tok", "action": "unpublish"}), None)
+    resp = pl.lambda_handler(_post({"t": "tok", "republish": "1", "title": "", "date": "2026-09-13"}), None)
+    assert "enter a title" in resp["body"]
+    assert "is_draft" in env["table"].job  # still unpublished, nothing changed
+
+
+def test_delete_removes_post_and_blocks_further_management(env):
+    path = _publish(env)
+    resp = pl.lambda_handler(_post({"t": "tok", "action": "delete"}), None)
+    assert "Deleted" in resp["body"]
+    assert env["manage_calls"] == [("delete", path, "Delete: Faith Changes Things")]
+    assert path not in env["posts"]
+    assert "deleted_at" in env["table"].job
+    again = pl.lambda_handler(_get(), None)
+    assert "Deleted" in again["body"]
+    # No further action is possible once deleted -- neither a toggle action...
+    resp = pl.lambda_handler(_post({"t": "tok", "action": "unpublish"}), None)
+    assert "Deleted" in resp["body"]
+    # ...nor the republish-edit flow, from either the GET or the POST side.
+    resp = pl.lambda_handler(_get_republish(), None)
+    assert "Deleted" in resp["body"]
+    resp = pl.lambda_handler(_post({"t": "tok", "republish": "1", "title": "New Title", "date": "2026-09-13"}), None)
+    assert "Deleted" in resp["body"]
+    assert len(env["manage_calls"]) == 1
+
+
+def test_manage_rejects_unknown_action(env):
+    _publish(env)
+    resp = pl.lambda_handler(_post({"t": "tok", "action": "explode"}), None)
+    assert "Unknown action" in resp["body"]
+    assert env["manage_calls"] == []
 
 
 def test_failed_commit_releases_claim(env, monkeypatch):

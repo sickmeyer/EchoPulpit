@@ -63,15 +63,23 @@ _secrets = boto3.client("secretsmanager", region_name=REGION)
 _signing_key = None
 
 
-def _publish_link(video_id: str) -> str:
-    """Signed single-article publish link, or "" when publishing isn't set up."""
+# A "manage this post" link (Unpublish/Delete) needs to keep working for as
+# long as the post is up, not just the 30-day window a publish link gets --
+# there's no way to revoke one early short of rotating the signing key, so a
+# long TTL costs nothing (it can only ever unpublish/delete this one post).
+MANAGE_LINK_TTL_DAYS = 365 * 5
+
+
+def _publish_link(video_id: str, ttl_days: float | None = None) -> str:
+    """Signed single-article publish/manage link, or "" when publishing isn't set up."""
     global _signing_key
     if not PUBLISH_URL:
         return ""
     try:
         if _signing_key is None:
             _signing_key = _secrets.get_secret_value(SecretId=PUBLISH_KEY_SECRET)["SecretString"].encode("utf-8")
-        return f"{PUBLISH_URL.rstrip('/')}/?t={make_token(_signing_key, video_id)}"
+        kwargs = {} if ttl_days is None else {"ttl_days": ttl_days}
+        return f"{PUBLISH_URL.rstrip('/')}/?t={make_token(_signing_key, video_id, **kwargs)}"
     except Exception as e:  # never let the link block the email itself
         print(f"Could not create publish link for {video_id}: {e}")
         return ""
@@ -327,6 +335,52 @@ def _send_failed_email(video_id: str, title: str, error: str, failure_count: str
     print(f"Sent FAILED alert email for {video_id}")
 
 
+def _send_published_email(video_id: str, title: str, published_title: str, published_url: str, end_time: str):
+    """Sent once, when a "Review & publish" click actually lands the post on
+    the blog. Carries a long-lived "Modify" link to unpublish or delete it --
+    same manage page the publish link turns into once the article is live."""
+    display_title = published_title or title
+    article = {}
+    try:
+        obj = _s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=f"sermons/{video_id}/article.json")
+        article = json.loads(obj["Body"].read())
+    except Exception as e:
+        print(f"Could not read article.json for {video_id}: {e}")
+
+    recipients = _recipients(article.get("language") or "en")
+    link = _publish_link(video_id, ttl_days=MANAGE_LINK_TTL_DAYS)
+    esc = html.escape
+
+    msg = MIMEMultipart()
+    msg["Subject"] = Header(_subject("Published", title, video_id, end_time), "utf-8")
+    msg["From"] = SENDER
+    msg["To"] = ", ".join(recipients)
+
+    live_line = f'"{display_title}" is now live' + (f" at {published_url}." if published_url else ".")
+    body_lines = [live_line, ""]
+    if link:
+        body_lines += [f"Modify (unpublish or delete): {link}", ""]
+
+    html_parts = [f"<p style='font-size:16px;margin:0 0 16px'>{esc(display_title)} is now live"
+                 + (f" at <a href='{esc(published_url)}'>{esc(published_url)}</a>." if published_url else ".")
+                 + "</p>"]
+    if link:
+        html_parts.append(
+            f"<p style='margin:0 0 20px'><a href='{esc(link)}' style='display:inline-block;background:#064060;"
+            f"color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 22px;border-radius:8px'>"
+            f"Modify</a></p>")
+    html_body = ("<div style='font-family:-apple-system,Segoe UI,Arial,sans-serif;color:#1d2329;max-width:640px'>"
+                + "".join(html_parts) + "</div>")
+
+    body = MIMEMultipart("alternative")
+    body.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
+    body.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(body)
+
+    _ses.send_raw_email(Source=SENDER, Destinations=recipients, RawMessage={"Data": msg.as_string()})
+    print(f"Sent PUBLISHED email for {video_id}")
+
+
 def lambda_handler(event, context):
     for record in event.get("Records", []):
         if record.get("eventName") not in ("INSERT", "MODIFY"):
@@ -345,11 +399,18 @@ def lambda_handler(event, context):
         new_s3_prefix = _get_field(new_image, "s3_prefix")
         s3_prefix_just_appeared = bool(new_s3_prefix) and not old_s3_prefix
 
+        old_published_url = _get_field(old_image, "published_url")
+        new_published_url = _get_field(new_image, "published_url")
+        published_just_happened = bool(new_published_url) and not old_published_url
+
         if new_status == "COMPLETE" and s3_prefix_just_appeared:
             _send_complete_email(video_id, title, new_s3_prefix, end_time)
         elif new_status == "FAILED" and old_status != "FAILED":
             error = _get_field(new_image, "error", "(no error message recorded)")
             failure_count = _get_field(new_image, "failure_count", "?")
             _send_failed_email(video_id, title, error, failure_count, end_time)
+        elif published_just_happened:
+            published_title = _get_field(new_image, "published_title")
+            _send_published_email(video_id, title, published_title, new_published_url, end_time)
 
     return {"processed": len(event.get("Records", []))}

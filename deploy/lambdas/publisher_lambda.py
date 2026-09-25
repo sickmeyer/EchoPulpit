@@ -167,10 +167,21 @@ def separate_blockquotes(md: str) -> str:
     return re.sub(r"^(>[^\n]*\n)(?=[^>\s])", r"\1\n", md, flags=re.M)
 
 
+def slugify(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+
+def resolve_slug(article: dict, title: str) -> str:
+    """Slug for `title` -- keep the pipeline's slug unless the reviewer edited the title."""
+    if title == (article.get("title") or ""):
+        return article.get("slug") or slugify(title)
+    return slugify(title)
+
+
 def build_post(article: dict, job: dict, preacher: str, pub_date: str, episode) -> tuple[str, str]:
     """(repo path, file contents) for the blog post."""
     vid = job["video_id"]
-    slug = article.get("slug") or re.sub(r"[^a-z0-9]+", "-", article["title"].lower()).strip("-")
+    slug = article.get("slug") or slugify(article["title"])
     front = {
         "title": article["title"],
         "slug": slug,
@@ -231,6 +242,52 @@ def commit_post(path: str, text: str, title: str) -> str:
     return body.get("commit", {}).get("html_url", "")
 
 
+def get_post(path: str) -> tuple[str, str]:
+    """(file contents, blob sha) of an already-published post."""
+    status, body = _github("GET", path)
+    if status != 200:
+        raise RuntimeError(f"{path} not found in the blog repo (GitHub returned {status})")
+    return base64.b64decode(body["content"]).decode("utf-8"), body["sha"]
+
+
+def update_post(path: str, text: str, message: str, sha: str) -> str:
+    status, body = _github("PUT", path, {
+        "message": message,
+        "content": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+        "branch": GITHUB_BRANCH,
+        "sha": sha,
+    })
+    if status not in (200, 201):
+        raise RuntimeError(f"GitHub returned {status}: {body.get('message', body)}")
+    return body.get("commit", {}).get("html_url", "")
+
+
+def delete_post(path: str, message: str, sha: str) -> str:
+    status, body = _github("DELETE", path, {"message": message, "branch": GITHUB_BRANCH, "sha": sha})
+    if status not in (200, 201):
+        raise RuntimeError(f"GitHub returned {status}: {body.get('message', body)}")
+    return body.get("commit", {}).get("html_url", "")
+
+
+_FRONTMATTER = re.compile(r"^---\n(.*?)\n---\n\n?(.*)$", re.S)
+
+
+def patch_frontmatter(text: str, **fields) -> str:
+    """Update specific frontmatter fields on an already-built post file,
+    leaving everything else (including any hand edits, and the file's own
+    path/URL) untouched. A value of None or "" removes that field."""
+    m = _FRONTMATTER.match(text)
+    if not m:
+        raise RuntimeError("post file has no frontmatter")
+    front = yaml.safe_load(m.group(1)) or {}
+    for k, v in fields.items():
+        if v in (None, ""):
+            front.pop(k, None)
+        else:
+            front[k] = v
+    return "---\n" + yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=1000) + "---\n\n" + m.group(2)
+
+
 # ---- pages ----
 
 CSS = """
@@ -245,6 +302,8 @@ h1{font-family:Georgia,serif;font-size:1.7rem;line-height:1.2;margin:.2em 0 .3em
 .banner{border-radius:10px;padding:12px 14px;margin:14px 0;font-weight:600}.banner.warn{background:var(--warn)}.banner.ok{background:var(--ok)}
 ul{margin:0;padding-left:1.2em}li{margin:.35em 0}.tag{display:inline-block;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:1px 7px;border-radius:99px;background:var(--quote);margin-right:6px}
 label{display:block;font-weight:600;margin:10px 0 4px}input[type=text],input[type=date]{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--bg);color:var(--fg)}
+.title-wrap{margin:.2em 0 .3em}.title-input{font-family:Georgia,serif;font-size:1.7rem;line-height:1.2;font-weight:700;width:100%;border:1px solid transparent;background:transparent;color:var(--fg);padding:.15em 0}.title-input:hover,.title-input:focus{outline:none;border-color:var(--line);background:var(--card);border-radius:8px;padding:.15em .5em}
+#slug-preview{word-break:break-all}
 .ack{display:flex;gap:10px;align-items:flex-start;font-weight:400;margin-top:14px}.ack input{margin-top:4px;width:18px;height:18px}
 button{margin-top:16px;width:100%;padding:13px;border:0;border-radius:10px;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:1.05rem;cursor:pointer}
 .article{font-family:Georgia,serif;font-size:1.08rem;line-height:1.7}.article blockquote{margin:1em 0;padding:.7em 1em;background:var(--quote);border-left:4px solid var(--red);font-style:italic}
@@ -271,17 +330,37 @@ def _list(items) -> str:
     return "<ul>" + "".join(f"<li>{html.escape(str(i))}</li>" for i in items) + "</ul>"
 
 
-def review_page(token: str, job: dict, article: dict, error: str = "", form: dict | None = None) -> dict:
+def review_page(token: str, job: dict, article: dict, error: str = "", form: dict | None = None,
+                republish: bool = False) -> dict:
+    """The publish-review form, and (republish=True) the same form reused to
+    make minor title/preacher/date edits when bringing an unpublished post
+    back -- no reviewer decisions to re-accept there (the article content
+    isn't being regenerated), and the URL stays whatever it already is."""
     esc = html.escape
-    notes = article.get("reviewer_notes") or {}
+    notes = {} if republish else (article.get("reviewer_notes") or {})
     flags = notes.get("flags") or []
     decisions = [f for f in flags if flag_category(f) in REVIEW_CATEGORIES]
     info = [f for f in flags if flag_category(f) not in REVIEW_CATEGORIES]
-    review = needs_review(article)
+    review = False if republish else needs_review(article)
     episode = feed_episode(job)
     form = form or {}
+    title = form.get("title", article.get("title") or "")
     preacher = form.get("preacher", article.get("preacher") or (episode or {}).get("author") or "")
     pub_date = form.get("date", service_date(job) or article.get("preached_on") or "")
+
+    if republish:
+        title_block = f'''<div class="title-wrap">
+<input type="text" id="title" name="title" form="pub" class="title-input" value="{esc(title)}" required>
+<p class="muted">URL stays {esc(job.get("published_url") or "")}</p>
+</div>'''
+    else:
+        slug = resolve_slug(article, title)
+        lang_prefix = "" if (article.get("language") or "en") == "en" else f"/{article['language']}"
+        title_block = f'''<div class="title-wrap">
+<input type="text" id="title" name="title" form="pub" class="title-input" value="{esc(title)}" required
+       oninput="document.getElementById('slug-preview').textContent=this.value.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')">
+<p class="muted">URL: {esc(BLOG_URL or "")}{esc(lang_prefix)}/posts/<span id="slug-preview">{esc(slug)}</span>/</p>
+</div>'''
 
     def flag_items(items):
         return "<ul>" + "".join(
@@ -289,11 +368,12 @@ def review_page(token: str, job: dict, article: dict, error: str = "", form: dic
 
     parts = [
         f'<p class="muted">{esc(job.get("title", ""))} · {esc(pub_date)}</p>',
-        f"<h1>{esc(article.get('title', ''))}</h1>",
+        title_block,
         f'<p class="muted">{esc(article.get("meta_description", ""))}</p>',
-        (f'<div class="banner warn">Review needed: {len(decisions)} decision(s) below. Publishing means you accept them.</div>'
-         if review else '<div class="banner ok">No decisions to review. Ready to publish.</div>'),
     ]
+    if not republish:
+        parts.append(f'<div class="banner warn">Review needed: {len(decisions)} decision(s) below. Publishing means you accept them.</div>'
+                     if review else '<div class="banner ok">No decisions to review. Ready to publish.</div>')
     if error:
         parts.append(f'<p class="err">{esc(error)}</p>')
     if decisions:
@@ -308,28 +388,81 @@ def review_page(token: str, job: dict, article: dict, error: str = "", form: dic
     if review:
         ack = ('<label class="ack"><input type="checkbox" name="ack" value="1" required> '
                "I've read the decisions above and accept them.</label>")
-    parts.append(f"""<form class="card" method="post" action="./">
-<h2>Publish</h2>
+    republish_field = '<input type="hidden" name="republish" value="1">' if republish else ""
+    button_label = "Republish" if republish else "Publish to the blog"
+    caption = (f"Live again at {esc(job.get('published_url') or BLOG_URL or 'the blog')} about two minutes after "
+              "republishing." if republish else
+              f"Goes live at {esc(BLOG_URL or 'the blog')} about two minutes after publishing.")
+    parts.append(f"""<form class="card" method="post" action="./" id="pub">
+<h2>{button_label}</h2>
 <input type="hidden" name="t" value="{esc(token)}">
+{republish_field}
 <label for="preacher">Preacher</label>
 <input type="text" id="preacher" name="preacher" value="{esc(preacher)}" placeholder="e.g. Pastor James Sickmeyer">
 <label for="date">Service date</label>
 <input type="date" id="date" name="date" value="{esc(pub_date)}" required>
 {ack}
-<button type="submit">Publish to the blog</button>
-<p class="muted">Goes live at {esc(BLOG_URL or "the blog")} about two minutes after publishing.</p>
+<button type="submit">{button_label}</button>
+<p class="muted">{caption}</p>
 </form>""")
     body_md = separate_blockquotes(article.get("article_markdown") or "")
     parts.append(f'<div class="card"><h2>The article</h2><div class="article">{markdown.markdown(body_md)}</div></div>')
-    return page(f"Publish: {article.get('title', '')}", "\n".join(parts))
+    return page(f"{'Republish' if republish else 'Publish'}: {title}", "\n".join(parts))
 
 
-def published_page(job: dict) -> dict:
-    url = job.get("published_url") or BLOG_URL
-    when = (job.get("published_at") or "")[:10]
-    return message_page("Already published",
-                        f'This article was published on {html.escape(when)}: '
-                        f'<a href="{html.escape(url)}">{html.escape(url)}</a>')
+def manage_page(token: str, job: dict, article: dict, error: str = "", notice: str = "") -> dict:
+    esc = html.escape
+    title = job.get("published_title") or article.get("title", "")
+    url = job.get("published_url") or ""
+    is_draft = bool(job.get("is_draft"))
+    when = (job.get("published_date") or (job.get("published_at") or "")[:10])
+    parts = [
+        f"<h1>{esc(title)}</h1>",
+        f'<p class="muted">Published {esc(when)}'
+        + (f' &middot; <a href="{esc(url)}">{esc(url)}</a>' if url else "") + "</p>",
+        ('<div class="banner warn">Unpublished &mdash; hidden from the live site.</div>' if is_draft
+         else '<div class="banner ok">Live on the blog.</div>'),
+    ]
+    if notice:
+        parts.append(f'<div class="banner ok">{esc(notice)}</div>')
+    if error:
+        parts.append(f'<p class="err">{esc(error)}</p>')
+
+    if is_draft:
+        parts.append(f"""<form class="card" method="get" action="./">
+<h2>Republish</h2>
+<p class="muted">Make this post live on the blog again -- brings up the same review step as the
+original publish, in case you want to make minor edits first.</p>
+<input type="hidden" name="t" value="{esc(token)}">
+<input type="hidden" name="republish" value="1">
+<button type="submit">Republish&hellip;</button>
+</form>""")
+    else:
+        parts.append(f"""<form class="card" method="post" action="./" \
+onsubmit="return confirm('Hide this post from the live site? You can republish it later.')">
+<h2>Unpublish</h2>
+<p class="muted">Hides this post from the live site. You can republish it later from this same page.</p>
+<input type="hidden" name="t" value="{esc(token)}">
+<input type="hidden" name="action" value="unpublish">
+<button type="submit">Unpublish</button>
+</form>""")
+
+    parts.append(f"""<form class="card" method="post" action="./" \
+onsubmit="return confirm('Delete this post? It comes down from the live site, and this page cannot bring it back afterward.')">
+<h2>Delete</h2>
+<p class="muted">Removes this post from the live site. It stays recoverable in the blog's GitHub history, but this
+page cannot bring it back afterward.</p>
+<input type="hidden" name="t" value="{esc(token)}">
+<input type="hidden" name="action" value="delete">
+<button type="submit" style="background:var(--red)">Delete</button>
+</form>""")
+    return page(f"Manage: {title}", "\n".join(parts))
+
+
+def deleted_page(job: dict) -> dict:
+    title = job.get("published_title") or ""
+    when = (job.get("deleted_at") or "")[:10]
+    return message_page("Deleted", f"“{html.escape(title)}” was deleted on {html.escape(when)}.")
 
 
 # ---- handler ----
@@ -350,6 +483,80 @@ def _load(token: str):
     return job, json.loads(obj["Body"].read())
 
 
+def _handle_manage(token: str, job: dict, article: dict, form: dict) -> dict:
+    action = form.get("action", "")
+    if action not in ("unpublish", "delete"):
+        return manage_page(token, job, article, "Unknown action.")
+    vid = job["video_id"]
+    path = job.get("published_path", "")
+    title = job.get("published_title") or article.get("title", "")
+    if not path:
+        return manage_page(token, job, article, "No published file on record; can't modify.")
+    try:
+        content, sha = get_post(path)
+    except Exception as e:
+        return manage_page(token, job, article, f"Could not load the post from GitHub: {e}")
+
+    if action == "delete":
+        try:
+            delete_post(path, f"Delete: {title}", sha)
+        except Exception as e:
+            return manage_page(token, job, article, f"Couldn't delete: {e}")
+        now = datetime.now(timezone.utc).isoformat()
+        _table.update_item(Key={"video_id": vid}, UpdateExpression="SET deleted_at = :t",
+                           ExpressionAttributeValues={":t": now})
+        return deleted_page({**job, "deleted_at": now})
+
+    try:
+        update_post(path, patch_frontmatter(content, draft=True), f"Unpublish: {title}", sha)
+    except Exception as e:
+        return manage_page(token, job, article, f"Couldn't unpublish: {e}")
+    _table.update_item(Key={"video_id": vid}, UpdateExpression="SET is_draft = :t",
+                       ExpressionAttributeValues={":t": True})
+    return manage_page(token, {**job, "is_draft": True}, article,
+                       notice="Unpublished. Hidden from the live site in about two minutes.")
+
+
+def _handle_republish_edit(token: str, job: dict, article: dict, form: dict) -> dict:
+    """POST from review_page(republish=True): apply the (possibly edited)
+    title/preacher/date to the existing file in place and clear `draft` --
+    the URL/path never change here, only content."""
+    title = (form.get("title") or "").strip()[:200]
+    preacher = (form.get("preacher") or "").strip()[:120]
+    pub_date = (form.get("date") or "").strip()
+    if not title:
+        return review_page(token, job, article, "Please enter a title.", form, republish=True)
+    try:
+        date.fromisoformat(pub_date)
+    except ValueError:
+        return review_page(token, job, article, "Please enter the service date.", form, republish=True)
+
+    vid = job["video_id"]
+    path = job.get("published_path", "")
+    if not path:
+        return manage_page(token, job, article, "No published file on record; can't modify.")
+    try:
+        content, sha = get_post(path)
+    except Exception as e:
+        return review_page(token, job, article, f"Could not load the post from GitHub: {e}", form, republish=True)
+
+    try:
+        new_text = patch_frontmatter(content, title=title, preacher=preacher, pubDate=pub_date, draft=None)
+        update_post(path, new_text, f"Republish: {title}", sha)
+    except Exception as e:
+        return review_page(token, job, article, f"Couldn't republish: {e}", form, republish=True)
+
+    _table.update_item(
+        Key={"video_id": vid},
+        UpdateExpression="SET published_title = :ti, published_preacher = :pr, published_date = :d",
+        ExpressionAttributeValues={":ti": title, ":pr": preacher, ":d": pub_date},
+    )
+    _table.update_item(Key={"video_id": vid}, UpdateExpression="REMOVE is_draft")
+    return manage_page(token, {**job, "published_title": title, "published_preacher": preacher,
+                               "published_date": pub_date, "is_draft": False}, article,
+                       notice="Republished. Live again in about two minutes.")
+
+
 def lambda_handler(event, context):
     method = (event.get("requestContext", {}).get("http", {}).get("method") or "GET").upper()
     if method == "POST":
@@ -365,13 +572,27 @@ def lambda_handler(event, context):
     except InvalidToken as e:
         return message_page("Link not valid", html.escape(str(e).capitalize()) + ".", 403)
 
+    if job.get("deleted_at"):
+        return deleted_page(job)
     if job.get("published_at"):
-        return published_page(job)
+        if method == "POST":
+            if form.get("republish") == "1":
+                return _handle_republish_edit(token, job, article, form)
+            return _handle_manage(token, job, article, form)
+        if (event.get("queryStringParameters") or {}).get("republish") == "1":
+            seed = {"title": job.get("published_title") or article.get("title") or "",
+                    "preacher": job.get("published_preacher") or "",
+                    "date": job.get("published_date") or ""}
+            return review_page(token, job, article, form=seed, republish=True)
+        return manage_page(token, job, article)
     if method != "POST":
         return review_page(token, job, article)
 
+    title = (form.get("title") or "").strip()[:200]
     preacher = (form.get("preacher") or "").strip()[:120]
     pub_date = (form.get("date") or "").strip()
+    if not title:
+        return review_page(token, job, article, "Please enter a title.", form)
     try:
         date.fromisoformat(pub_date)
     except ValueError:
@@ -391,11 +612,12 @@ def lambda_handler(event, context):
             ExpressionAttributeValues={":t": now, ":ack": review, ":f": [str(f) for f in flags] if review else []},
         )
     except _table.meta.client.exceptions.ConditionalCheckFailedException:
-        return published_page(_table.get_item(Key={"video_id": vid})["Item"])
+        return manage_page(token, _table.get_item(Key={"video_id": vid})["Item"], article)
 
+    effective_article = {**article, "title": title, "slug": resolve_slug(article, title)}
     try:
-        path, text = build_post(article, job, preacher, pub_date, feed_episode(job))
-        commit_url = commit_post(path, text, article["title"])
+        path, text = build_post(effective_article, job, preacher, pub_date, feed_episode(job))
+        commit_url = commit_post(path, text, title)
     except Exception as e:
         # Release the claim so the reviewer can try again.
         _table.update_item(Key={"video_id": vid},
@@ -404,15 +626,16 @@ def lambda_handler(event, context):
         return review_page(token, job, article, f"Publishing failed, nothing was published: {e}", form)
 
     slug = path.rsplit("/", 1)[-1][len(pub_date) + 1:-3]
-    lang_prefix = "" if (article.get("language") or "en") == "en" else f"/{article['language']}"
-    post_url = f"{BLOG_URL}{lang_prefix}/posts/{article.get('slug') or slug}/" if BLOG_URL else ""
+    lang_prefix = "" if (effective_article.get("language") or "en") == "en" else f"/{effective_article['language']}"
+    post_url = f"{BLOG_URL}{lang_prefix}/posts/{effective_article.get('slug') or slug}/" if BLOG_URL else ""
     _table.update_item(
         Key={"video_id": vid},
         UpdateExpression="SET published_url = :u, published_path = :p, published_commit = :c, "
-                         "published_preacher = :pr, published_date = :d",
-        ExpressionAttributeValues={":u": post_url, ":p": path, ":c": commit_url, ":pr": preacher, ":d": pub_date},
+                         "published_preacher = :pr, published_date = :d, published_title = :ti",
+        ExpressionAttributeValues={":u": post_url, ":p": path, ":c": commit_url, ":pr": preacher, ":d": pub_date,
+                                   ":ti": title},
     )
     print(f"published {vid} -> {path}")
     link = f'<a href="{html.escape(post_url)}">{html.escape(post_url)}</a>' if post_url else "the blog"
-    return message_page("Published", f"“{html.escape(article['title'])}” will be live at {link} in about two "
+    return message_page("Published", f"“{html.escape(title)}” will be live at {link} in about two "
                         "minutes, once the site finishes rebuilding.")
